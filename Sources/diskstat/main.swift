@@ -489,15 +489,25 @@ final class DiskMenuRowView: NSView {
         let total = formatter.string(fromByteCount: disk.totalBytes)
         let percent = Int(round(disk.usedFraction * 100))
 
-        let iconImage = NSWorkspace.shared.icon(forFile: disk.mountURL.path)
-        iconImage.size = NSSize(width: 24, height: 24)
-        let iconView = NSImageView(image: iconImage)
+        // Don't mutate the workspace image's `size`: it is a shared, multi-rep
+        // image (32 representations at 32pt), and resizing it defers the
+        // representation re-resolution. Until that settles, the image view's
+        // footprint is unstable and the volume name next to it shifts a few
+        // points as the row appears. Pinning the view instead lets
+        // `imageScaling` downscale the 32pt icon into a fixed 24pt slot.
+        let iconView = NSImageView(image: NSWorkspace.shared.icon(forFile: disk.mountURL.path))
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let titleLabel = NSTextField(labelWithString: disk.name)
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
+        // A label's default hugging priority is low, so in a `.fill` stack it
+        // would absorb the slack and move when the icon resolves. Keep it at its
+        // intrinsic width and let the spacer take up the difference.
+        titleLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         titleLabel.textColor = .labelColor
 
         let topRow = NSStackView()
@@ -577,7 +587,10 @@ final class DiskMenuRowView: NSView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             topRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             bottomRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            progress.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            progress.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            // Fixed icon slot, so the row's layout is final on the first pass.
+            iconView.widthAnchor.constraint(equalToConstant: 24),
+            iconView.heightAnchor.constraint(equalToConstant: 24)
         ])
     }
 
