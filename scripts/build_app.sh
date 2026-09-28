@@ -20,6 +20,10 @@ ICON_ICNS_NAME="DiskStat.icns"
 
 cd "$ROOT_DIR"
 
+# Keep the generated fallback in step with the tag before compiling, so a bare
+# `swift run` and the bundle never disagree.
+"$ROOT_DIR/scripts/set_version.sh"
+
 swift build -c release
 
 APP_DIR="$ROOT_DIR/Dist/${APP_NAME}.app"

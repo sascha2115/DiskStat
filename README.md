@@ -78,6 +78,27 @@ cp -R Dist/DiskStat.app ~/Applications/
 
 This unloads the LaunchAgent and deletes `~/Applications/DiskStat.app`.
 
+## Releasing
+
+The version lives in the git tag, and the build script reads it from there, so
+tagging is the only step that decides a version number.
+
+```bash
+git add -A && git commit -m "..."
+git tag -a v1.1.0 -m "DiskStat 1.1.0"     # -a matters, see below
+./scripts/build_app.sh
+```
+
+Use `git tag -a`, not a lightweight tag: `git describe --tags` prefers annotated
+tags, so a lightweight tag on the same commit is silently ignored and the build
+would report the *previous* version.
+
+`./scripts/build_app.sh` calls `scripts/set_version.sh`, which regenerates
+`Sources/diskstat/Version.swift` from the tag. That file is committed, because
+it is what the app falls back to when it runs outside a bundle (`swift run`) and
+there is no `CFBundleShortVersionString` to read. Run `./scripts/set_version.sh`
+on its own if you tag without building; `swift test` fails if the two disagree.
+
 ## Notes
 
 - Uses local mounted volumes from `FileManager.mountedVolumeURLs(...)` with

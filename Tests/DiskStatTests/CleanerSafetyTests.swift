@@ -221,4 +221,42 @@ final class CleanerSafetyTests: XCTestCase {
             XCTAssertFalse(artifact.summary.isEmpty)
         }
     }
+
+    // MARK: - Version
+
+    /// The version shown when there is no bundle has to come from the same tag
+    /// the bundle is built from, otherwise the app reports two different
+    /// numbers depending only on how it was launched. This pins the generated
+    /// file to the tag, which is the one thing here that can silently drift.
+    func testGeneratedVersionMatchesTheLatestGitTag() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // CleanerSafetyTests.swift
+            .deletingLastPathComponent()   // DiskStatTests
+            .deletingLastPathComponent()   // repo root
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", root.path, "describe", "--tags", "--abbrev=0"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        // Deliberately not a skip: a silent skip here once hid a wrong root
+        // path, and a version guard that quietly stops guarding is worse than
+        // one that fails.
+        XCTAssertEqual(process.terminationStatus, 0,
+                       "git describe failed in \(root.path) — wrong repo root?")
+
+        let tag = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(tag.isEmpty)
+
+        // `git describe` reports the most recent *annotated* tag: a lightweight
+        // tag on the same commit loses to an annotated one, so the release tag
+        // has to be created with -a for this to hold.
+        XCTAssertEqual(generatedVersion, String(tag.dropFirst()),
+                       "run ./scripts/set_version.sh after tagging, and tag with -a")
+    }
 }

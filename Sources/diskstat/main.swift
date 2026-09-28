@@ -1062,12 +1062,19 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private var lastProgressUpdate: Date = .distantPast
     private let progressUpdateInterval: TimeInterval = 0.25
 
-    /// Shown next to the title in the menu. Read from the bundle so the number
-    /// on screen is the one that was actually tagged — `scripts/build_app.sh`
-    /// puts the latest tag into `CFBundleShortVersionString`. `swift run` has
-    /// no bundle to read, so it says so rather than showing a stale number.
+    /// Shown next to the title in the menu.
+    ///
+    /// The bundle wins when there is one, so the `.app` reports exactly what
+    /// `scripts/build_app.sh` tagged. A bare `swift run` has no bundle to read,
+    /// so it falls back to `generatedVersion` from `Version.swift`, which
+    /// `scripts/set_version.sh` writes from the same tag.
     private let appVersion: String = {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        if let bundled = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+           !bundled.isEmpty
+        {
+            return bundled
+        }
+        return generatedVersion
     }()
 
     /// User notifications only work from a real, identified app bundle. Under

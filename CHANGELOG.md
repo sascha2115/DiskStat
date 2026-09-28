@@ -4,6 +4,16 @@ Versions are tagged; the bundle's `CFBundleShortVersionString` is read from the
 most recent tag at build time, so tagging is the only step needed to release.
 `CFBundleVersion` is the commit count.
 
+## Unreleased
+
+### Fixed
+- The version now appears when the app is run as a bare executable (`swift run`)
+  or as `.build/release/diskstat`, not only from the `.app` bundle. Those runs
+  have no `Info.plist` to read, so they fell back to showing "dev".
+  `scripts/set_version.sh` writes the tagged version into a generated
+  `Sources/diskstat/Version.swift`, and a test pins that file to the latest tag
+  so it cannot go stale unnoticed.
+
 ## 1.0.1 - 2025-09-28
 
 ### Added
