@@ -76,6 +76,9 @@ struct DiskUsage: Identifiable {
 }
 
 
+/// Volumes, the status item and the menu are all main-thread state. The
+/// compiler now enforces that rather than it being a convention.
+@MainActor
 final class DiskUsageProvider {
     private let fileManager = FileManager.default
 
@@ -138,20 +141,24 @@ final class DiskUsageProvider {
 
         metaInFlight.insert(path)
 
-        metaQueue.async { [weak self] in
+        // The background work needs nothing from `self`, so nothing is captured
+        // across the queue boundary. The completion only picks `self` up again
+        // once it is back on the main thread.
+        metaQueue.async {
             let meta = DiskutilInspector.meta(forMountPath: path)
+            let ttl = meta == .unknown ? DiskMetaCache.failureTTL : DiskMetaCache.ttl
 
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.metaInFlight.remove(path)
-                self.metaCache.store(
-                    meta,
-                    forMountPath: path,
-                    // Don't hold on to a failure: retry sooner than a real hit.
-                    ttl: meta == .unknown ? DiskMetaCache.failureTTL : DiskMetaCache.ttl
-                )
+            DispatchQueue.main.async { [weak self] in
+                self?.finishLookup(meta, ttl: ttl, forMountPath: path)
             }
         }
+    }
+
+    private func finishLookup(_ meta: DiskMeta, ttl: TimeInterval, forMountPath path: String) {
+        metaInFlight.remove(path)
+        // A failed lookup gets a short ttl so a transient error does not leave
+        // a volume labelled "Unknown" for the full five minutes.
+        metaCache.store(meta, forMountPath: path, ttl: ttl)
     }
 
     private func mountedVolumeURLs() -> [URL] {
@@ -710,6 +717,8 @@ enum DiskCleaner {
     }
 }
 
+/// Row views are only ever built and updated on the main thread.
+@MainActor
 final class DiskMenuRowView: NSView {
     /// The width is fixed, but the height follows the content — see
     /// `sizeToFitContent()`.
@@ -942,6 +951,9 @@ final class DiskMenuRowView: NSView {
     }
 }
 
+/// The controller owns the status item and the menu, and holds the in-flight
+/// state for cleaning. All of it is main-thread state, now enforced.
+@MainActor
 final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let provider = DiskUsageProvider()
     private let byteFormatter: ByteCountFormatter = {
@@ -1009,8 +1021,12 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // open. Safe now precisely because of the change above: the timer only
         // touches the status item and a background cache, never the menu.
         let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            self?.updateStatusItem()
-            self?.provider.refreshDiskMetadataInBackground()
+            // A timer on the main run loop always fires on the main thread, so
+            // this is a statement of fact rather than an assumption.
+            MainActor.assumeIsolated {
+                self?.updateStatusItem()
+                self?.provider.refreshDiskMetadataInBackground()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer
@@ -1023,7 +1039,10 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             workspaceObservers.append(
                 workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    self?.volumesDidChange()
+                    // Delivered on the main queue, so this is main-thread state.
+                    MainActor.assumeIsolated {
+                        self?.volumesDidChange()
+                    }
                 }
             )
         }
