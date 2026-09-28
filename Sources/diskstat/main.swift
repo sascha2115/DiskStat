@@ -473,10 +473,14 @@ enum DiskutilInspector {
 }
 
 final class DiskMenuRowView: NSView {
+    private let onEject: (() -> Void)?
+
     init(
         disk: DiskUsage,
-        formatter: ByteCountFormatter
+        formatter: ByteCountFormatter,
+        onEject: (() -> Void)? = nil
     ) {
+        self.onEject = onEject
         super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 104))
 
         wantsLayer = true
@@ -520,10 +524,23 @@ final class DiskMenuRowView: NSView {
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         topRow.addArrangedSubview(spacer)
 
-        // No eject button in this view. A control inside a custom
-        // `NSMenuItem.view` never becomes a menu item action, so AppKit gives it
-        // none of the usual menu semantics and will not dismiss the menu when it
-        // is used. The action is a real NSMenuItem placed next to this row.
+        let showEjectButton = disk.isExternal || disk.isEjectable
+
+        if showEjectButton {
+            let ejectButton = NSButton(title: "", target: self, action: #selector(ejectTapped))
+            ejectButton.bezelStyle = .texturedRounded
+            ejectButton.isBordered = false
+            ejectButton.image = NSImage(
+                systemSymbolName: "eject.fill",
+                accessibilityDescription: "Eject \(disk.name)"
+            )
+            ejectButton.contentTintColor = .secondaryLabelColor
+            ejectButton.setButtonType(.momentaryPushIn)
+            ejectButton.toolTip = "Eject \(disk.name)"
+            ejectButton.setContentHuggingPriority(.required, for: .horizontal)
+            ejectButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+            topRow.addArrangedSubview(ejectButton)
+        }
 
         let progress = NSProgressIndicator()
         progress.isIndeterminate = false
@@ -580,6 +597,11 @@ final class DiskMenuRowView: NSView {
     required init?(coder: NSCoder) {
         nil
     }
+
+    @objc private func ejectTapped() {
+        onEject?()
+    }
+
 }
 
 final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -733,24 +755,15 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         } else {
             for disk in disks {
                 let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-                item.view = DiskMenuRowView(disk: disk, formatter: byteFormatter)
+                item.view = DiskMenuRowView(
+                    disk: disk,
+                    formatter: byteFormatter,
+                    onEject: { [weak self] in
+                        self?.ejectDisk(disk)
+                    }
+                )
                 item.toolTip = disk.path
                 menu.addItem(item)
-
-                // A real menu item with a real action. AppKit highlights it,
-                // gives it keyboard navigation, and closes the menu itself when
-                // it is chosen -- none of which the in-view button got.
-                if disk.isExternal || disk.isEjectable {
-                    let ejectItem = NSMenuItem(
-                        title: "Eject \(disk.name)",
-                        action: #selector(ejectDiskAction(_:)),
-                        keyEquivalent: ""
-                    )
-                    ejectItem.target = self
-                    ejectItem.representedObject = disk
-                    ejectItem.toolTip = "Eject \(disk.name)"
-                    menu.addItem(ejectItem)
-                }
 
                 menu.addItem(.separator())
             }
@@ -849,18 +862,17 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         NSSound.beep()
     }
 
-    /// Bridge from the eject menu item to the disk it stands for.
-    @objc private func ejectDiskAction(_ sender: NSMenuItem) {
-        guard let disk = sender.representedObject as? DiskUsage else { return }
-        ejectDisk(disk)
-    }
-
     private func ejectDisk(_ disk: DiskUsage) {
         do {
-            // No explicit menu dismissal here. Choosing a real menu item makes
-            // AppKit close the menu itself, so the didUnmount refresh that
-            // follows is never deferred waiting for a close.
             try NSWorkspace.shared.unmountAndEjectDevice(at: disk.mountURL)
+
+            // The eject button lives inside a custom `NSMenuItem.view`, so the
+            // click never becomes a menu item action and AppKit does NOT close
+            // the menu for us. Without this the menu stays open, the didUnmount
+            // refresh is deferred by `rebuildMenuIfIdle()` waiting for a close
+            // that never comes, and the row we just ejected sits there stale
+            // until the user dismisses the menu by hand.
+            menu.cancelTracking()
         } catch {
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
@@ -868,7 +880,8 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
         // The authoritative refresh is the didUnmount notification, which fires
         // when the unmount really completes. This is only a safety net in case
-        // that notification is missed.
+        // that notification is missed, and rebuildMenuIfIdle() defers if the
+        // menu is somehow still open.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.volumesDidChange()
         }
