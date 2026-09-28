@@ -186,4 +186,39 @@ final class CleanerSafetyTests: XCTestCase {
         XCTAssertNil(MacArtifact(name: ".hidden-config"))
         XCTAssertNil(MacArtifact(name: "notes.txt"))
     }
+
+    // MARK: - Log summary
+
+    func testCleanResultGroupsRemovedItemsByType() {
+        let volume = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diskstat-log-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: volume.appendingPathComponent("Media/Film.mkv"),
+            withIntermediateDirectories: true
+        )
+        for sidecar in ["._Film.mkv", "._Poster.jpg"] {
+            try? Data("x".utf8).write(to: volume.appendingPathComponent("Media/\(sidecar)"))
+        }
+        try? Data("x".utf8).write(to: volume.appendingPathComponent(".DS_Store"))
+        defer { try? FileManager.default.removeItem(at: volume) }
+
+        let result = DiskCleaner.clean(volume: volume, progress: { _ in }, isCancelled: { false })
+
+        XCTAssertEqual(result?.removedCount, 3)
+        XCTAssertEqual(result?.failedCount, 0)
+        XCTAssertEqual(result?.removedByArtifact[.dsStore], 1)
+        XCTAssertEqual(result?.removedByArtifact[.appleDouble], 2)
+        // The real file is untouched, and it is not counted as removed.
+        XCTAssertNil(result?.removedByArtifact[.temporaryItems])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: volume.appendingPathComponent("Media/Film.mkv").path))
+    }
+
+    func testEveryArtifactAppearsInTheSummaryOrder() {
+        // Guards against an artefact being added to the enum but forgotten in the
+        // log's "By type" section, which would silently under-report it.
+        XCTAssertEqual(Set(MacArtifact.allCases).count, 6)
+        for artifact in MacArtifact.allCases {
+            XCTAssertFalse(artifact.summary.isEmpty)
+        }
+    }
 }

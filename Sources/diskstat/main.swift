@@ -42,7 +42,7 @@ struct DiskUsage: Identifiable {
     /// new to any diffing consumer, so a future list would tear down and
     /// rebuild instead of updating, and animations and selection would not
     /// survive a refresh.
-    var id: String { mountURL.path }
+    var id: String { path }
 
     let name: String
     let mountURL: URL
@@ -534,6 +534,11 @@ enum MacArtifact {
         }
     }
 
+    /// Grouped-ordering for the log summary.
+    static let allCases: [MacArtifact] = [
+        .dsStore, .appleDouble, .extendedAttributes, .spotlight, .fileSystemEvents, .temporaryItems
+    ]
+
     var summary: String {
         switch self {
         case .dsStore:            return ".DS_Store files"
@@ -554,6 +559,9 @@ struct CleanableItem {
 struct CleanResult {
     var removedPaths: [String] = []
     var failedPaths: [String] = []
+
+    /// How many of each artefact type was removed, for the summary line.
+    var removedByArtifact: [MacArtifact: Int] = [:]
     var wasCancelled = false
 
     var removedCount: Int { removedPaths.count }
@@ -600,6 +608,7 @@ enum DiskCleaner {
             do {
                 try FileManager.default.removeItem(at: item.url)
                 result.removedPaths.append(item.url.path)
+                result.removedByArtifact[item.artifact, default: 0] += 1
             } catch {
                 // A file we are not allowed to remove must not stop the run.
                 result.failedPaths.append("\(item.url.path) (\(error.localizedDescription))")
@@ -708,6 +717,15 @@ enum DiskCleaner {
         if result.wasCancelled { summary += " (cancelled)" }
         lines.append(summary)
 
+        // Grouped by type first, so the useful part of the record survives even
+        // if the cap below rolls the file over on a very large clean.
+        if !result.removedByArtifact.isEmpty {
+            lines.append("By type:")
+            for artifact in MacArtifact.allCases where result.removedByArtifact[artifact] != nil {
+                lines.append("  \(result.removedByArtifact[artifact] ?? 0) x \(artifact.summary)")
+            }
+        }
+
         lines.append("Removed items:")
         lines.append(contentsOf: result.removedPaths.sorted().map { "  \($0)" })
 
@@ -758,7 +776,7 @@ final class DiskMenuRowView: NSView {
     private static let verticalInset: CGFloat = 8
 
     private let onEject: (() -> Void)?
-    private let onClean: ((DiskMenuRowView) -> Void)?
+    private let onClean: (() -> Void)?
     private let onCancel: (() -> Void)?
 
     private let detailsLabel = NSTextField(labelWithString: "")
@@ -775,7 +793,7 @@ final class DiskMenuRowView: NSView {
         disk: DiskUsage,
         formatter: ByteCountFormatter,
         onEject: (() -> Void)? = nil,
-        onClean: ((DiskMenuRowView) -> Void)? = nil,
+        onClean: (() -> Void)? = nil,
         onCancel: (() -> Void)? = nil
     ) {
         self.onEject = onEject
@@ -954,7 +972,7 @@ final class DiskMenuRowView: NSView {
         if isBusy {
             onCancel?()
         } else {
-            onClean?(self)
+            onClean?()
         }
     }
 
@@ -1021,6 +1039,37 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     /// Block observers for volume mount/unmount, removed on termination.
     private var workspaceObservers: [NSObjectProtocol] = []
+
+    /// The row views currently on screen, keyed by mount path. The menu is
+    /// rebuilt from scratch on every open, so a long-running clean has to look
+    /// the *current* row up rather than the one it started with — otherwise its
+    /// progress would be written to a view that is no longer in the menu.
+    private var rowsByPath: [String: DiskMenuRowView] = [:]
+
+    /// Throttles clean progress updates. The scan reports once per directory,
+    /// which on a large media library is tens of thousands of callbacks, almost
+    /// all of which would redraw the same label on the main thread.
+    private var lastProgressUpdate: Date = .distantPast
+    private let progressUpdateInterval: TimeInterval = 0.25
+
+    private func currentRow(for disk: DiskUsage) -> DiskMenuRowView? {
+        rowsByPath[disk.path]
+    }
+
+    /// Puts a row into (or out of) the cleaning state. Tolerates a row that is
+    /// no longer on screen, because the menu can be rebuilt mid-clean.
+    private func setRowBusy(_ busy: Bool, for disk: DiskUsage) {
+        guard let row = currentRow(for: disk) else { return }
+        if busy { row.setStatus("Cleaning…", percent: "") }
+        row.setBusy(busy)
+    }
+
+    private func reportProgress(_ found: Int, for disk: DiskUsage) {
+        let now = Date()
+        guard now.timeIntervalSince(lastProgressUpdate) >= progressUpdateInterval else { return }
+        lastProgressUpdate = now
+        currentRow(for: disk)?.setStatus("Cleaning… \(found) found", percent: "")
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -1153,6 +1202,7 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     private func rebuildMenu() {
         menu.removeAllItems()
+        rowsByPath.removeAll()
 
         let titleItem = NSMenuItem(title: "DiskStat", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
@@ -1166,22 +1216,32 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             menu.addItem(empty)
         } else {
             for disk in disks {
-                let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-                item.view = DiskMenuRowView(
+                let row = DiskMenuRowView(
                     disk: disk,
                     formatter: byteFormatter,
                     onEject: { [weak self] in
                         self?.ejectDisk(disk)
                     },
-                    onClean: { [weak self] row in
-                        self?.startClean(disk, row: row)
+                    onClean: { [weak self] in
+                        self?.startClean(disk)
                     },
                     onCancel: { [weak self] in
                         self?.cancelClean.value = true
                     }
                 )
+                let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                item.view = row
                 item.toolTip = disk.path
                 menu.addItem(item)
+
+                rowsByPath[disk.path] = row
+
+                // A clean that is still running outlives the row it started on,
+                // so a freshly built row has to pick the state back up.
+                if cleaningDisk?.path == disk.path {
+                    row.setStatus("Cleaning…", percent: "")
+                    row.setBusy(true)
+                }
 
                 menu.addItem(.separator())
             }
@@ -1283,13 +1343,13 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// Cleaning and ejecting are one action on purpose: macOS recreates
     /// `.DS_Store` and `._*` as soon as the Mac browses the volume, so a clean
     /// only survives if it is the last thing done before the drive leaves.
-    private func startClean(_ disk: DiskUsage, row: DiskMenuRowView) {
+    private func startClean(_ disk: DiskUsage) {
         guard DiskCleaner.canClean(disk), cleaningDisk == nil else { return }
 
         cleaningDisk = disk
         cancelClean.value = false
-        row.setStatus("Cleaning…", percent: "")
-        row.setBusy(true)
+        lastProgressUpdate = .distantPast
+        setRowBusy(true, for: disk)
 
         // Deliberately a strong capture: the controller must outlive this so the
         // background work can always report its result back.
@@ -1297,16 +1357,14 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             guard let result = DiskCleaner.clean(
                 volume: disk.mountURL,
                 progress: { found in
-                    DispatchQueue.main.async {
-                        row.setStatus("Cleaning… \(found) found", percent: "")
-                    }
+                    DispatchQueue.main.async { self.reportProgress(found, for: disk) }
                 },
                 isCancelled: { self.cancelClean.value }
             ) else {
                 // Refused: that is the volume macOS is running from.
                 DispatchQueue.main.async {
                     self.cleaningDisk = nil
-                    row.setBusy(false)
+                    self.setRowBusy(false, for: disk)
                 }
                 return
             }
@@ -1315,12 +1373,15 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
             DispatchQueue.main.async {
                 self.cleaningDisk = nil
-                row.setBusy(false)
+                // The row the clean started on may be long gone; update whichever
+                // row is actually on screen now.
+                self.setRowBusy(false, for: disk)
 
                 if result.wasCancelled {
                     // Leave the volume mounted: the user stopped this, they did
                     // not ask for it to be taken away.
-                    row.setStatus("Cancelled · \(result.removedCount) removed", percent: "")
+                    self.currentRow(for: disk)?
+                        .setStatus("Cancelled · \(result.removedCount) removed", percent: "")
                     return
                 }
 
