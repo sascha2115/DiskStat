@@ -32,9 +32,24 @@
 - **Reference**: `what_is_cleaned.txt` for the exact scope
 - **Never touches**: `.Trashes` (the user's deleted files), the startup
   volume, or any volume other than the one selected
+- **Symlinks are never followed**: a link is never removed and never
+  descended into, so a clean cannot reach outside the selected volume.
+  Re-enforced inside `DiskCleaner.clean()`, not only at the UI layer
 - **Operations**:
   - Scans the whole volume first, then deletes, so a long run stays cancellable
   - Uses POSIX `readdir`; `FileManager` hides the `._*` files it must remove
   - Runs on a background queue; the clean button becomes a cancel button
-  - Logs every removed path to `~/Library/Logs/DiskStat_clean.log`
+  - Keeps working across a menu rebuild, and throttles progress to 4/sec
+  - Logs every removed path to `~/Library/Logs/DiskStat_clean.log`,
+    grouped by artefact type ahead of the path list
   - Ejects on success; a cancelled run leaves the volume mounted
+
+## 6. Test Agent
+- **Target**: `Tests/DiskStatTests/CleanerSafetyTests.swift`
+- **Command**: `swift test` (manual — nothing runs it in CI, and a
+  destructive-safety change without a test is an incomplete change)
+- **Covers**: what the cleaner refuses to do. A test that cannot fail when
+  its guarantee is removed is not a test — verify by breaking the guard
+  and watching it go red before trusting it
+- **Known gap**: the eject/clean/cancel buttons and the row layout can
+  only be verified by hand, with a real DMG or media drive attached

@@ -75,7 +75,6 @@ struct DiskUsage: Identifiable {
     }
 }
 
-
 /// Volumes, the status item and the menu are all main-thread state. The
 /// compiler now enforces that rather than it being a convention.
 @MainActor
@@ -801,8 +800,6 @@ final class DiskMenuRowView: NSView {
         self.onCancel = onCancel
         super.init(frame: NSRect(x: 0, y: 0, width: Self.rowWidth, height: 0))
 
-        wantsLayer = true
-
         let used = formatter.string(fromByteCount: disk.usedBytes)
         let total = formatter.string(fromByteCount: disk.totalBytes)
         let percent = Int(round(disk.usedFraction * 100))
@@ -1078,9 +1075,11 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         statusItem.menu = menu
 
         if let button = statusItem.button {
+            // The status item is image-only by design: the pie carries the
+            // reading and the percentage lives in the tooltip. An earlier
+            // version set a title here; it rendered nothing but kept the
+            // button's width and font doing pointless work.
             button.imagePosition = .imageLeft
-            button.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-            button.title = ""
             button.toolTip = "Disk usage: unavailable"
         }
 
@@ -1181,7 +1180,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     private func updateStatusItem() {
         guard let primary = provider.primaryDisk() else {
-            statusItem.button?.title = ""
             statusItem.button?.image = pieImage(fractionUsed: 0)
             statusItem.button?.toolTip = "Disk usage: unavailable"
             return
@@ -1195,7 +1193,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             pieCache = (percent, pieImage(fractionUsed: primary.usedFraction))
         }
 
-        statusItem.button?.title = ""
         statusItem.button?.image = pieCache?.image
         statusItem.button?.toolTip = "\(primary.name): \(percent)% used"
     }
@@ -1256,7 +1253,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refreshNow), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
-
 
         let storageSettingsItem = NSMenuItem(title: "Open Storage Settings…", action: #selector(openStorageSettings), keyEquivalent: "")
         storageSettingsItem.target = self
@@ -1418,7 +1414,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             self?.volumesDidChange()
         }
     }
-
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
