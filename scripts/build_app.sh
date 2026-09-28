@@ -4,7 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="DiskStat"
 BUNDLE_ID="com.sascha.diskstat"
-VERSION="1.0"
+# The human-facing version is whatever the most recent tag says, so the tag and
+# the bundle cannot drift apart. Bump the version by tagging, not by editing
+# this file -- a hardcoded constant is what left the app reporting "1.0"
+# through 24 commits.
+if VERSION_TAG="$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null)"; then
+    VERSION="${VERSION_TAG#v}"
+else
+    VERSION="0.0.0-dev"
+fi
 # Build number tracks the commit count so builds are distinguishable.
 BUILD_NUMBER="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)"
 ICON_PNG="$ROOT_DIR/Sources/icon/AppIcon.png"
