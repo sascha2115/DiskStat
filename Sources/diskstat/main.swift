@@ -473,12 +473,20 @@ enum DiskutilInspector {
 }
 
 final class DiskMenuRowView: NSView {
-    private let onEject: (() -> Void)?
+    private let onEject: ((DiskMenuRowView) -> Void)?
+
+    private let detailsLabel = NSTextField(labelWithString: "")
+    private let percentLabel = NSTextField(labelWithString: "")
+    private var ejectButton: NSButton?
+
+    private var normalDetails = ""
+    private var normalPercent = ""
+    private var isEjecting = false
 
     init(
         disk: DiskUsage,
         formatter: ByteCountFormatter,
-        onEject: (() -> Void)? = nil
+        onEject: ((DiskMenuRowView) -> Void)? = nil
     ) {
         self.onEject = onEject
         super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 104))
@@ -527,19 +535,20 @@ final class DiskMenuRowView: NSView {
         let showEjectButton = disk.isExternal || disk.isEjectable
 
         if showEjectButton {
-            let ejectButton = NSButton(title: "", target: self, action: #selector(ejectTapped))
-            ejectButton.bezelStyle = .texturedRounded
-            ejectButton.isBordered = false
-            ejectButton.image = NSImage(
+            let button = NSButton(title: "", target: self, action: #selector(ejectTapped))
+            button.bezelStyle = .texturedRounded
+            button.isBordered = false
+            button.image = NSImage(
                 systemSymbolName: "eject.fill",
                 accessibilityDescription: "Eject \(disk.name)"
             )
-            ejectButton.contentTintColor = .secondaryLabelColor
-            ejectButton.setButtonType(.momentaryPushIn)
-            ejectButton.toolTip = "Eject \(disk.name)"
-            ejectButton.setContentHuggingPriority(.required, for: .horizontal)
-            ejectButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-            topRow.addArrangedSubview(ejectButton)
+            button.contentTintColor = .secondaryLabelColor
+            button.setButtonType(.momentaryPushIn)
+            button.toolTip = "Eject \(disk.name)"
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+            topRow.addArrangedSubview(button)
+            ejectButton = button
         }
 
         let progress = NSProgressIndicator()
@@ -550,12 +559,15 @@ final class DiskMenuRowView: NSView {
         progress.controlSize = .regular
         progress.style = .bar
 
-        let detailsLabel = NSTextField(labelWithString: "Used: \(used) of \(total)")
+        normalDetails = "Used: \(used) of \(total)"
+        normalPercent = "\(percent)% used"
+
+        detailsLabel.stringValue = normalDetails
         detailsLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailsLabel.textColor = .secondaryLabelColor
         detailsLabel.lineBreakMode = .byTruncatingTail
 
-        let percentLabel = NSTextField(labelWithString: "\(percent)% used")
+        percentLabel.stringValue = normalPercent
         percentLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         percentLabel.textColor = .labelColor
         percentLabel.alignment = .right
@@ -599,9 +611,27 @@ final class DiskMenuRowView: NSView {
     }
 
     @objc private func ejectTapped() {
-        onEject?()
+        guard let onEject, !isEjecting else { return }
+        onEject(self)
     }
 
+    /// Shows in-place progress while the volume is being ejected, so the menu
+    /// can stay open.
+    ///
+    /// This only swaps label text and button state on a view we own. It never
+    /// touches the menu's item structure, which is what makes it safe to call
+    /// while AppKit is tracking the menu. The row is removed for real by the
+    /// rebuild that `menuDidClose` triggers.
+    func setEjecting(_ ejecting: Bool) {
+        guard isEjecting != ejecting else { return }
+        isEjecting = ejecting
+
+        ejectButton?.isEnabled = !ejecting
+        ejectButton?.contentTintColor = ejecting ? .tertiaryLabelColor : .secondaryLabelColor
+
+        detailsLabel.stringValue = ejecting ? "Ejecting…" : normalDetails
+        percentLabel.stringValue = ejecting ? "" : normalPercent
+    }
 }
 
 final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -758,8 +788,8 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
                 item.view = DiskMenuRowView(
                     disk: disk,
                     formatter: byteFormatter,
-                    onEject: { [weak self] in
-                        self?.ejectDisk(disk)
+                    onEject: { [weak self] row in
+                        self?.ejectDisk(disk, from: row)
                     }
                 )
                 item.toolTip = disk.path
@@ -862,26 +892,23 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         NSSound.beep()
     }
 
-    private func ejectDisk(_ disk: DiskUsage) {
+    private func ejectDisk(_ disk: DiskUsage, from row: DiskMenuRowView) {
+        // The menu stays open: the row reports "Ejecting…" in place instead of
+        // the menu being dismissed. Removing the row here would mean mutating a
+        // tracking menu, so the structural rebuild is left to `menuDidClose`.
+        row.setEjecting(true)
+
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: disk.mountURL)
-
-            // The eject button lives inside a custom `NSMenuItem.view`, so the
-            // click never becomes a menu item action and AppKit does NOT close
-            // the menu for us. Without this the menu stays open, the didUnmount
-            // refresh is deferred by `rebuildMenuIfIdle()` waiting for a close
-            // that never comes, and the row we just ejected sits there stale
-            // until the user dismisses the menu by hand.
-            menu.cancelTracking()
         } catch {
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
+            row.setEjecting(false)
         }
 
         // The authoritative refresh is the didUnmount notification, which fires
         // when the unmount really completes. This is only a safety net in case
-        // that notification is missed, and rebuildMenuIfIdle() defers if the
-        // menu is somehow still open.
+        // that notification is missed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.volumesDidChange()
         }
