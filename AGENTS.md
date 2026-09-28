@@ -4,7 +4,7 @@
 - **Purpose**: Compiles Swift code into executables
 - **Scripts**: `scripts/build_app.sh` (for app bundle)
 - **Commands**: `swift build -c release`
-- **Output**: `/dist/DiskStat.app`
+- **Output**: `Dist/DiskStat.app`
 
 ## 2. Login Item Agent
 - **Purpose**: Installs app as macOS login item
@@ -14,14 +14,16 @@
 ## 3. Uninstallation Agent
 - **Purpose**: Removes login item and app traces
 - **Script**: `scripts/uninstall_login_item.sh`
-- **Action**: Cleans up LaunchAgent and local copies
+- **Action**: Cleans up LaunchAgent and the `~/Applications` copy, after
+  checking the bundle id so it can never remove an unrelated app
 
 ## 4. Disk Monitoring Agent
 - **Core Functionality**: Implements disk usage tracking
 - **Source**: `Sources/diskstat/main.swift`
 - **Techniques**:
   - Uses `FileManager.mountedVolumeURLs()` for volume detection
-  - Excludes hidden volumes (`.Spotlight-V100`, `.Trashes`)
+  - Hides hidden volumes via `.skipHiddenVolumes`, drops non-local ones
+  - Never offers eject or clean for the volume macOS is running from
   - Refreshes every 10s via timer
 
 ## 5. Cleanup Agent

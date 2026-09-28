@@ -13,6 +13,12 @@ fi
 
 mkdir -p "$HOME/Library/LaunchAgents"
 
+# The path is interpolated into XML below, so it has to be escaped: a path
+# containing &, < or > would otherwise produce an invalid plist.
+APP_PATH_XML="${APP_PATH//&/&amp;}"
+APP_PATH_XML="${APP_PATH_XML//</&lt;}"
+APP_PATH_XML="${APP_PATH_XML//>/&gt;}"
+
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,7 +29,7 @@ cat > "$PLIST_PATH" <<PLIST
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/open</string>
-        <string>${APP_PATH}</string>
+        <string>${APP_PATH_XML}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

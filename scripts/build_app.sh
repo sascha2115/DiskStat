@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="DiskStat"
 BUNDLE_ID="com.sascha.diskstat"
 VERSION="1.0"
-BUILD_NUMBER="1"
+# Build number tracks the commit count so builds are distinguishable.
+BUILD_NUMBER="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)"
 ICON_PNG="$ROOT_DIR/Sources/icon/AppIcon.png"
 ICON_ICNS_NAME="DiskStat.icns"
 
@@ -74,7 +75,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 PLIST
 
 if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+    # Sign the nested binary first and the bundle second. `--deep` is
+    # discouraged by Apple because it signs nested code indiscriminately; here
+    # there is exactly one nested item worth signing.
+    codesign --force --sign - "$MACOS_DIR/$APP_NAME" >/dev/null 2>&1 || true
+    codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
 echo "Built app bundle at: $APP_DIR"

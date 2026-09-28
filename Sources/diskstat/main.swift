@@ -55,11 +55,37 @@ struct DiskUsage: Identifiable {
         guard totalBytes > 0 else { return 0 }
         return min(max(Double(usedBytes) / Double(totalBytes), 0), 1)
     }
+
+    /// Ejecting is offered for removable volumes only, and never for the one
+    /// macOS is running from — which matters if the Mac was booted from an
+    /// external drive, where the system volume is removable but unmounting it
+    /// would pull the rug out from under the running system.
+    var canEject: Bool {
+        mountURL.standardizedFileURL.path != "/" && (isExternal || isEjectable)
+    }
 }
 
 
 final class DiskUsageProvider {
     private let fileManager = FileManager.default
+
+    /// The resource keys every volume lookup needs.
+    ///
+    /// This was written out three times, and one copy silently omitted
+    /// `.volumeIsLocalKey` — so the status bar and the menu list were applying
+    /// different rules to the same volume.
+    private static let volumeKeys: Set<URLResourceKey> = [
+        .volumeNameKey,
+        .volumeLocalizedFormatDescriptionKey,
+        .volumeTotalCapacityKey,
+        .volumeAvailableCapacityKey,
+        .volumeAvailableCapacityForImportantUsageKey,
+        .volumeAvailableCapacityForOpportunisticUsageKey,
+        .volumeIsInternalKey,
+        .volumeIsEjectableKey,
+        .volumeIsLocalKey
+    ]
+
     private let metaCache = DiskMetaCache()
 
     /// Background queue for `diskutil`, which is a blocking subprocess call.
@@ -120,33 +146,13 @@ final class DiskUsageProvider {
 
     private func mountedVolumeURLs() -> [URL] {
         fileManager.mountedVolumeURLs(
-            includingResourceValuesForKeys: [
-                .volumeNameKey,
-                .volumeLocalizedFormatDescriptionKey,
-                .volumeTotalCapacityKey,
-                .volumeAvailableCapacityKey,
-                .volumeAvailableCapacityForImportantUsageKey,
-                .volumeAvailableCapacityForOpportunisticUsageKey,
-                .volumeIsInternalKey,
-                .volumeIsEjectableKey,
-                .volumeIsLocalKey
-            ],
+            includingResourceValuesForKeys: Array(Self.volumeKeys),
             options: [.skipHiddenVolumes]
         ) ?? []
     }
 
     private func diskUsage(for url: URL) -> DiskUsage? {
-        guard let values = try? url.resourceValues(forKeys: [
-            .volumeNameKey,
-            .volumeLocalizedFormatDescriptionKey,
-            .volumeTotalCapacityKey,
-            .volumeAvailableCapacityKey,
-            .volumeAvailableCapacityForImportantUsageKey,
-            .volumeAvailableCapacityForOpportunisticUsageKey,
-            .volumeIsInternalKey,
-            .volumeIsEjectableKey,
-            .volumeIsLocalKey
-        ]) else {
+        guard let values = try? url.resourceValues(forKeys: Self.volumeKeys) else {
             return nil
         }
 
@@ -185,19 +191,17 @@ final class DiskUsageProvider {
 
     private func disk(atPath path: String) -> DiskUsage? {
         let url = URL(fileURLWithPath: path)
-        guard let values = try? url.resourceValues(forKeys: [
-            .volumeNameKey,
-            .volumeLocalizedFormatDescriptionKey,
-            .volumeTotalCapacityKey,
-            .volumeAvailableCapacityKey,
-            .volumeAvailableCapacityForImportantUsageKey,
-            .volumeAvailableCapacityForOpportunisticUsageKey,
-            .volumeIsInternalKey,
-            .volumeIsEjectableKey
-        ]),
-        let total = values.volumeTotalCapacity,
-        let free = resolveFreeBytes(for: url, values: values),
-        total > 0 else {
+        guard let values = try? url.resourceValues(forKeys: Self.volumeKeys) else {
+            return nil
+        }
+
+        guard values.volumeIsLocal != false else {
+            return nil
+        }
+
+        guard let total = values.volumeTotalCapacity,
+              let free = resolveFreeBytes(for: url, values: values),
+              total > 0 else {
             return nil
         }
 
@@ -759,7 +763,7 @@ final class DiskMenuRowView: NSView {
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         topRow.addArrangedSubview(spacer)
 
-        let showEjectButton = disk.isExternal || disk.isEjectable
+        let showEjectButton = disk.canEject
 
         if showEjectButton {
             let eject = NSButton(title: "", target: self, action: #selector(ejectTapped))
@@ -909,6 +913,9 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private let cleanQueue = DispatchQueue(label: "com.sascha.diskstat.clean", qos: .userInitiated)
     private let cancelClean = SynchronizedBox(false)
     private var cleaningDisk: DiskUsage?
+
+    /// Last rendered pie, keyed by the rounded percentage it represents.
+    private var pieCache: (percent: Int, image: NSImage?)?
     private var refreshTimer: Timer?
     private let refreshInterval: TimeInterval = 10
 
@@ -1025,8 +1032,15 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         }
 
         let percent = Int(round(primary.usedFraction * 100))
+
+        // Rasterising a 20x20 image every 10 seconds, 360 times an hour, is
+        // wasted work whenever the rounded percentage has not moved.
+        if pieCache?.percent != percent {
+            pieCache = (percent, pieImage(fractionUsed: primary.usedFraction))
+        }
+
         statusItem.button?.title = ""
-        statusItem.button?.image = pieImage(fractionUsed: primary.usedFraction)
+        statusItem.button?.image = pieCache?.image
         statusItem.button?.toolTip = "\(primary.name): \(percent)% used"
     }
 
@@ -1143,17 +1157,15 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     }
 
     @objc private func openStorageSettings() {
-        let urls = [
-            "x-apple.systempreferences:com.apple.settings.Storage",
-            "x-apple.systempreferences:com.apple.settings.Storage?path=General",
-            "x-apple.systempreferences:com.apple.preferences.storage",
-            "x-apple.systempreferences:com.apple.preference.general?Storage"
-        ].compactMap(URL.init(string:))
+        // One URL, not a fallback chain. `NSWorkspace.open` reports whether the
+        // request was *accepted*, not whether the intended pane appeared, so
+        // walking a list of schemes exits on the first accepted one even when it
+        // lands on the wrong screen. Two of the previous four were legacy
+        // schemes that are dead on current macOS.
+        let url = URL(string: "x-apple.systempreferences:com.apple.settings.Storage")
 
-        for url in urls {
-            if NSWorkspace.shared.open(url) {
-                return
-            }
+        if let url, NSWorkspace.shared.open(url) {
+            return
         }
 
         NSSound.beep()
@@ -1204,6 +1216,10 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     }
 
     private func ejectDisk(_ disk: DiskUsage) {
+        // Re-checked here as well: the button is only a hint, and the clean
+        // action reaches this path too.
+        guard disk.canEject else { return }
+
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: disk.mountURL)
 
