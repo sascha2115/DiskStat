@@ -43,6 +43,10 @@
   - Logs every removed path to `~/Library/Logs/DiskStat_clean.log`,
     grouped by artefact type ahead of the path list
   - Ejects on success; a cancelled run leaves the volume mounted
+  - Posts a system notification with the counts, because the menu row showing
+    the result is not on screen if the menu was closed during the run. Plain
+    ejects do not notify. Needs a real bundle id, so `.app` only, never
+    `swift run`
 
 ## 6. Test Agent
 - **Target**: `Tests/DiskStatTests/CleanerSafetyTests.swift`

@@ -1,5 +1,18 @@
 import AppKit
 import Darwin
+import UserNotifications
+
+/// Errors this app raises itself, as opposed to system ones.
+enum DiskStatError: LocalizedError {
+    case notEjectable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notEjectable(let path):
+            return "\(path) is not a volume that can be ejected"
+        }
+    }
+}
 
 /// Minimal thread-safe box for values produced on a background queue.
 private final class SynchronizedBox<Value>: @unchecked Sendable {
@@ -1049,6 +1062,49 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private var lastProgressUpdate: Date = .distantPast
     private let progressUpdateInterval: TimeInterval = 0.25
 
+    /// User notifications only work from a real, identified app bundle. Under
+    /// `swift run` there is none, and the authorisation request would silently
+    /// do nothing, so the guard keeps that path quiet.
+    private let canUseUserNotifications: Bool = {
+        Bundle.main.bundleURL.pathExtension.lowercased() == "app"
+            && Bundle.main.bundleIdentifier != nil
+    }()
+
+    private func requestNotificationAuthorization() {
+        guard canUseUserNotifications else { return }
+        UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// Reports the outcome of a clean. This is the only feedback the user gets
+    /// if the menu was closed while the clean ran — the row showing the result
+    /// is not on screen in that case.
+    private func postCleanupNotification(
+        diskName: String,
+        result: CleanResult,
+        ejectError: Error?
+    ) {
+        guard canUseUserNotifications else { return }
+
+        let content = UNMutableNotificationContent()
+        if ejectError == nil {
+            content.title = "Disk cleaned and ejected"
+            content.body = "\(diskName): removed \(result.removedCount), failed \(result.failedCount)."
+        } else {
+            content.title = "Disk cleaned (eject failed)"
+            content.body = "\(diskName): removed \(result.removedCount), "
+                + "failed \(result.failedCount). \(ejectError?.localizedDescription ?? "")"
+        }
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "diskstat.cleanup.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
     private func currentRow(for disk: DiskUsage) -> DiskMenuRowView? {
         rowsByPath[disk.path]
     }
@@ -1086,6 +1142,7 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         menu.delegate = self
 
         updateStatusItem()
+        requestNotificationAuthorization()
         provider.refreshDiskMetadataInBackground()
 
         // The timer deliberately does NOT rebuild the menu: `menuNeedsUpdate`
@@ -1388,16 +1445,24 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
                     return
                 }
 
-                self.ejectDisk(disk)
+                let ejectError = self.ejectDisk(disk)
+                self.postCleanupNotification(
+                    diskName: disk.name,
+                    result: result,
+                    ejectError: ejectError
+                )
             }
         }
     }
 
-    private func ejectDisk(_ disk: DiskUsage) {
+    @discardableResult
+    private func ejectDisk(_ disk: DiskUsage) -> Error? {
         // Re-checked here as well: the button is only a hint, and the clean
-        // action reaches this path too.
-        guard disk.canEject else { return }
+        // action reaches this path too. The error is returned so the clean can
+        // report the outcome, not just swallow it into a beep.
+        guard disk.canEject else { return DiskStatError.notEjectable(disk.path) }
 
+        var ejectError: Error?
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: disk.mountURL)
 
@@ -1409,6 +1474,7 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             // until the user dismisses the menu by hand.
             menu.cancelTracking()
         } catch {
+            ejectError = error
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
         }
@@ -1420,6 +1486,8 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.volumesDidChange()
         }
+
+        return ejectError
     }
 
     @objc private func quitApp() {

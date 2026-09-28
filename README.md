@@ -16,6 +16,9 @@ Tiny macOS menu bar app that shows disk usage as a pie icon.
   - **clean** — remove macOS artefacts (`.DS_Store`, `._*`, `@eaDir`, Spotlight
     index and friends) and then eject, so the drive is clean when it reaches
     Kodi or Windows. Never touches `.Trashes`; see `what_is_cleaned.txt`.
+  - a finished clean posts a system notification with what was removed. It
+    asks for notification permission on first launch. Only available from the
+    `.app` bundle — under `swift run` there is no bundle id to authorise.
 - Includes `Refresh Now`, `Open Storage Settings…` and `Quit DiskStat` actions.
 
 ## Run
