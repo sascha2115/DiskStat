@@ -608,6 +608,15 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private var refreshTimer: Timer?
     private let refreshInterval: TimeInterval = 10
 
+    /// Whether AppKit currently has the menu open. Tracked via the
+    /// `menuWillOpen`/`menuDidClose` delegate callbacks — `NSMenu` exposes no
+    /// "is tracking" property.
+    private var isMenuOpen = false
+
+    /// Set when a rebuild was requested while the menu was open, and applied
+    /// once it closes. See `rebuildMenuIfIdle()`.
+    private var pendingMenuRebuild = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
@@ -641,6 +650,37 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // AppKit calls this just before the menu is displayed, before it starts
+        // tracking, so rebuilding here is safe. This is also the only path that
+        // has to stay: it is what keeps the menu current on every open.
+        pendingMenuRebuild = false
+        rebuildMenu()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+
+        guard pendingMenuRebuild else { return }
+        pendingMenuRebuild = false
+        rebuildMenu()
+    }
+
+    /// Rebuilds the menu unless AppKit currently has it open.
+    ///
+    /// Mutating an `NSMenu` that is open and tracking is undefined behaviour:
+    /// the highlight under the cursor can vanish mid-hover, and the click that
+    /// triggered the action can be swallowed. When that is the case the request
+    /// is remembered here and applied in `menuDidClose` instead.
+    private func rebuildMenuIfIdle() {
+        guard !isMenuOpen else {
+            pendingMenuRebuild = true
+            return
+        }
+
         rebuildMenu()
     }
 
@@ -758,7 +798,10 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     @objc private func refreshNow() {
         updateStatusItem()
-        rebuildMenu()
+        // Deliberately no `rebuildMenu()`: this action fires while the menu is
+        // still open and tracking. The menu closes as soon as it returns, and
+        // `menuNeedsUpdate` rebuilds it from fresh data on the next open.
+        provider.refreshDiskMetadataInBackground()
     }
 
     @objc private func openStorageSettings() {
@@ -785,9 +828,11 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
         }
+        // The eject button lives inside the menu, so this can land while AppKit
+        // is still tracking it — rebuildMenuIfIdle() defers in that case.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.updateStatusItem()
-            self?.rebuildMenu()
+            self?.rebuildMenuIfIdle()
         }
     }
 
