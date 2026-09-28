@@ -1100,9 +1100,13 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // open. Safe now precisely because of the change above: the timer only
         // touches the status item and a background cache, never the menu.
         let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            // A timer on the main run loop always fires on the main thread, so
-            // this is a statement of fact rather than an assumption.
-            MainActor.assumeIsolated {
+            // A timer on `RunLoop.main` does fire on the main thread, so this
+            // hop is not strictly needed. It is here because that guarantee
+            // comes from a property of *this line* rather than from the
+            // callback — and `MainActor.assumeIsolated` would turn any later
+            // edit that broke it into a crash in shipped code, not a bug. One
+            // run-loop turn on a ten-second timer costs nothing.
+            DispatchQueue.main.async { [weak self] in
                 self?.updateStatusItem()
                 self?.provider.refreshDiskMetadataInBackground()
             }
@@ -1118,8 +1122,11 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             workspaceObservers.append(
                 workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    // Delivered on the main queue, so this is main-thread state.
-                    MainActor.assumeIsolated {
+                    // `queue: .main` already delivers on the main thread; this
+                    // hop is belt and braces, so the main-actor guarantee holds
+                    // even if that queue argument is ever changed. Volume
+                    // notifications are rare, so the cost is irrelevant.
+                    DispatchQueue.main.async { [weak self] in
                         self?.volumesDidChange()
                     }
                 }
