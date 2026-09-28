@@ -33,7 +33,17 @@ struct DiskMeta: Equatable {
 }
 
 struct DiskUsage: Identifiable {
-    let id = UUID()
+    /// Stable identity: the same volume always produces the same id.
+    ///
+    /// This was a fresh `UUID()` per instance, so every refresh handed out new
+    /// ids for the same disks. Nothing here reads it today — the rows are
+    /// `NSView`s in an `NSMenu`, which has no notion of identity — but a
+    /// changing id is the worst kind of `Identifiable`: it makes every row look
+    /// new to any diffing consumer, so a future list would tear down and
+    /// rebuild instead of updating, and animations and selection would not
+    /// survive a refresh.
+    var id: String { mountURL.path }
+
     let name: String
     let mountURL: URL
     let totalBytes: Int64
