@@ -697,12 +697,19 @@ enum DiskCleaner {
 }
 
 final class DiskMenuRowView: NSView {
+    /// The width is fixed, but the height follows the content — see
+    /// `sizeToFitContent()`.
+    private static let rowWidth: CGFloat = 340
+    private static let horizontalInset: CGFloat = 12
+    private static let verticalInset: CGFloat = 8
+
     private let onEject: (() -> Void)?
     private let onClean: ((DiskMenuRowView) -> Void)?
     private let onCancel: (() -> Void)?
 
     private let detailsLabel = NSTextField(labelWithString: "")
     private let percentLabel = NSTextField(labelWithString: "")
+    private let stack = NSStackView()
     private var ejectButton: NSButton?
     private var cleanButton: NSButton?
 
@@ -720,7 +727,7 @@ final class DiskMenuRowView: NSView {
         self.onEject = onEject
         self.onClean = onClean
         self.onCancel = onCancel
-        super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 104))
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.rowWidth, height: 0))
 
         wantsLayer = true
 
@@ -832,7 +839,8 @@ final class DiskMenuRowView: NSView {
         metaLabel.textColor = .tertiaryLabelColor
         metaLabel.lineBreakMode = .byTruncatingTail
 
-        let stack = NSStackView(views: [topRow, progress, bottomRow, metaLabel])
+        let stack = self.stack
+        [topRow, progress, bottomRow, metaLabel].forEach { stack.addArrangedSubview($0) }
         stack.orientation = .vertical
         stack.spacing = 6
         stack.alignment = .leading
@@ -841,10 +849,12 @@ final class DiskMenuRowView: NSView {
         addSubview(stack)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalInset),
+            // Deliberately no bottom pin. The row takes the height its content
+            // needs, so a larger system font or a long volume name cannot be
+            // clipped by a hardcoded frame.
             topRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             bottomRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             progress.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -852,6 +862,30 @@ final class DiskMenuRowView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: 24),
             iconView.heightAnchor.constraint(equalToConstant: 24)
         ])
+
+        // The menu is assembled from these views, so the height must be right
+        // before NSMenu measures the item.
+        sizeToFitContent()
+    }
+
+    override func layout() {
+        super.layout()
+        applyContentHeight()
+    }
+
+    private func sizeToFitContent() {
+        layoutSubtreeIfNeeded()
+        applyContentHeight()
+    }
+
+    /// `NSMenu` takes a custom item view's height from its frame, so a fixed
+    /// frame silently clips anything taller than it. Not hypothetical: the
+    /// content outgrew the hardcoded 104pt by 3pt at the current font settings,
+    /// and would clip more at larger ones.
+    private func applyContentHeight() {
+        let needed = stack.frame.height + Self.verticalInset * 2
+        guard needed > 0, abs(frame.height - needed) > 0.5 else { return }
+        frame.size.height = needed
     }
 
     required init?(coder: NSCoder) {
