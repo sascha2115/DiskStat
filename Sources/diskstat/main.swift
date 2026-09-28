@@ -87,13 +87,13 @@ final class DiskUsageProvider {
     /// This was written out three times, and one copy silently omitted
     /// `.volumeIsLocalKey` — so the status bar and the menu list were applying
     /// different rules to the same volume.
+    ///
+    /// Note what is *not* here: the "important usage" and "opportunistic usage"
+    /// capacity keys. See `resolveFreeBytes` for why they are not used.
     private static let volumeKeys: Set<URLResourceKey> = [
         .volumeNameKey,
-        .volumeLocalizedFormatDescriptionKey,
         .volumeTotalCapacityKey,
         .volumeAvailableCapacityKey,
-        .volumeAvailableCapacityForImportantUsageKey,
-        .volumeAvailableCapacityForOpportunisticUsageKey,
         .volumeIsInternalKey,
         .volumeIsEjectableKey,
         .volumeIsLocalKey
@@ -141,16 +141,18 @@ final class DiskUsageProvider {
 
         metaInFlight.insert(path)
 
-        // The background work needs nothing from `self`, so nothing is captured
-        // across the queue boundary. The completion only picks `self` up again
-        // once it is back on the main thread.
+        // Neither closure captures `self`. The background work needs nothing
+        // from the provider, and the completion only needs the finished
+        // metadata, so the weak reference is created once, out here, rather
+        // than implicitly inherited by the outer closure.
+        let finish: @MainActor @Sendable (DiskMeta, TimeInterval) -> Void = { [weak self] meta, ttl in
+            self?.finishLookup(meta, ttl: ttl, forMountPath: path)
+        }
+
         metaQueue.async {
             let meta = DiskutilInspector.meta(forMountPath: path)
             let ttl = meta == .unknown ? DiskMetaCache.failureTTL : DiskMetaCache.ttl
-
-            DispatchQueue.main.async { [weak self] in
-                self?.finishLookup(meta, ttl: ttl, forMountPath: path)
-            }
+            DispatchQueue.main.async { finish(meta, ttl) }
         }
     }
 
@@ -240,32 +242,37 @@ final class DiskUsageProvider {
         )
     }
 
+    /// Free space on a volume, in bytes.
+    ///
+    /// Deliberately just `volumeAvailableCapacity` — what `statfs` reports — for
+    /// every filesystem.
+    ///
+    /// The other two capacity keys look like they refine this ("important" and
+    /// "opportunistic" usage), but they are not more precise free space: they
+    /// answer a different question, namely how willing macOS is to delete
+    /// purgeable data to make room. They also cannot be ranked by
+    /// "most conservative first" the way the names suggest. On this machine,
+    /// sampled repeatedly and stably:
+    ///
+    ///     plain            276.00 GB
+    ///     important        284.23 GB   <- more than the total free space
+    ///     opportunistic    269.47 GB
+    ///
+    /// "Important usage" free space exceeding the total free space is not a
+    /// typo. The previous version preferred the important value on APFS, which
+    /// made the app report more free space than actually exists and disagree
+    /// with Disk Utility.
+    ///
+    /// Plain total and plain free are also a self-consistent pair: for a system
+    /// volume the total is the APFS container ceiling and the free space is the
+    /// container's free space, so `total - free` comes out byte-for-byte equal
+    /// to what `diskutil` reports as "Capacity In Use By Volumes".
     private func resolveFreeBytes(for url: URL, values: URLResourceValues) -> Int64? {
-        let isAPFS = values.volumeLocalizedFormatDescription?
-            .localizedCaseInsensitiveContains("APFS") == true
-
-        let candidates: [Int64?]
-        if isAPFS {
-            candidates = [
-                values.volumeAvailableCapacityForImportantUsage,
-                values.volumeAvailableCapacityForOpportunisticUsage,
-                values.volumeAvailableCapacity.map(Int64.init)
-            ]
-        } else {
-            candidates = [
-                values.volumeAvailableCapacity.map(Int64.init),
-                values.volumeAvailableCapacityForImportantUsage,
-                values.volumeAvailableCapacityForOpportunisticUsage
-            ]
+        if let free = values.volumeAvailableCapacity {
+            return Int64(free)
         }
 
-        if let positive = candidates.compactMap({ $0 }).first(where: { $0 > 0 }) {
-            return positive
-        }
-        if let zero = candidates.compactMap({ $0 }).first(where: { $0 == 0 }) {
-            return zero
-        }
-
+        // Fallback for the rare volume that will not report the key.
         if let attributes = try? fileManager.attributesOfFileSystem(forPath: url.path),
            let free = attributes[.systemFreeSize] as? NSNumber {
             return free.int64Value
