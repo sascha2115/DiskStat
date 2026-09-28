@@ -1062,6 +1062,14 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private var lastProgressUpdate: Date = .distantPast
     private let progressUpdateInterval: TimeInterval = 0.25
 
+    /// Shown next to the title in the menu. Read from the bundle so the number
+    /// on screen is the one that was actually tagged — `scripts/build_app.sh`
+    /// puts the latest tag into `CFBundleShortVersionString`. `swift run` has
+    /// no bundle to read, so it says so rather than showing a stale number.
+    private let appVersion: String = {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }()
+
     /// User notifications only work from a real, identified app bundle. Under
     /// `swift run` there is none, and the authorisation request would silently
     /// do nothing, so the guard keeps that path quiet.
@@ -1265,7 +1273,7 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         menu.removeAllItems()
         rowsByPath.removeAll()
 
-        let titleItem = NSMenuItem(title: "DiskStat", action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: "DiskStat \(appVersion)", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
         menu.addItem(.separator())
