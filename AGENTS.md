@@ -25,8 +25,14 @@
   - Refreshes every 10s via timer
 
 ## 5. Cleanup Agent
-- **Purpose**: Manages disk cleanup tasks
-- **Reference**: `what_is_cleaned.txt`
+- **Purpose**: Removes macOS artefacts from a removable volume, then ejects it
+- **Source**: `DiskCleaner` / `MacArtifact` in `Sources/diskstat/main.swift`
+- **Reference**: `what_is_cleaned.txt` for the exact scope
+- **Never touches**: `.Trashes` (the user's deleted files), the startup
+  volume, or any volume other than the one selected
 - **Operations**:
-  - Deletes `.DS_Store`, `._*`, and system temp folders
-  - Supports both root and recursive cleaning
+  - Scans the whole volume first, then deletes, so a long run stays cancellable
+  - Uses POSIX `readdir`; `FileManager` hides the `._*` files it must remove
+  - Runs on a background queue; the clean button becomes a cancel button
+  - Logs every removed path to `~/Library/Logs/DiskStat_clean.log`
+  - Ejects on success; a cancelled run leaves the volume mounted
