@@ -11,6 +11,9 @@ Dist/
 # Finder alias at the repo root that points into Dist/DiskStat.app
 /DiskStat
 
+# Archive: retired/legacy sources kept for reference only, not built or tracked
+/archive/
+
 # Xcode
 *.xcodeproj/
 *.xcworkspace/
