@@ -630,6 +630,9 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// once it closes. See `rebuildMenuIfIdle()`.
     private var pendingMenuRebuild = false
 
+    /// Block observers for volume mount/unmount, removed on termination.
+    private var workspaceObservers: [NSObjectProtocol] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
@@ -656,10 +659,35 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             self?.updateStatusItem()
             self?.provider.refreshDiskMetadataInBackground()
         }
+
+        // A volume appearing or disappearing is the real signal that the disk
+        // list is stale. Polling alone left an ejected volume listed in the
+        // menu, because `unmountAndEjectDevice` returns before the unmount has
+        // actually finished, so any fixed delay is a race.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            workspaceObservers.append(
+                workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    self?.volumesDidChange()
+                }
+            )
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         refreshTimer?.invalidate()
+
+        for observer in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        workspaceObservers.removeAll()
+    }
+
+    /// Reacts to a volume being mounted or unmounted, by us or by anyone else.
+    private func volumesDidChange() {
+        updateStatusItem()
+        provider.refreshDiskMetadataInBackground()
+        rebuildMenuIfIdle()
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -841,11 +869,13 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
         }
-        // The eject button lives inside the menu, so this can land while AppKit
-        // is still tracking it — rebuildMenuIfIdle() defers in that case.
+
+        // The authoritative refresh is the didUnmount notification, which fires
+        // when the unmount really completes. This is only a safety net in case
+        // that notification is missed, and rebuildMenuIfIdle() defers if the
+        // menu is still open.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.updateStatusItem()
-            self?.rebuildMenuIfIdle()
+            self?.volumesDidChange()
         }
     }
 
