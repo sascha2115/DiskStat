@@ -1,4 +1,36 @@
 import AppKit
+import Darwin
+
+/// Minimal thread-safe box for values produced on a background queue.
+private final class SynchronizedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value
+
+    init(_ value: Value) {
+        storage = value
+    }
+
+    var value: Value {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
+        }
+    }
+}
+
+/// Filesystem and partition scheme of a volume, as reported by `diskutil`.
+struct DiskMeta: Equatable {
+    let fileSystem: String
+    let partitionMap: String
+
+    static let unknown = DiskMeta(fileSystem: "Unknown", partitionMap: "Unknown")
+}
 
 struct DiskUsage: Identifiable {
     let id = UUID()
@@ -28,11 +60,66 @@ struct DiskUsage: Identifiable {
 
 final class DiskUsageProvider {
     private let fileManager = FileManager.default
-    private var diskutilCache: [String: (fileSystem: String, partitionMap: String, timestamp: Date)] = [:]
-    private let diskutilCacheTTL: TimeInterval = 60 * 5
+    private let metaCache = DiskMetaCache()
+
+    /// Background queue for `diskutil`, which is a blocking subprocess call.
+    private let metaQueue = DispatchQueue(label: "com.sascha.diskstat.diskutil", qos: .utility)
+
+    /// Mount paths with a `diskutil` lookup currently in flight.
+    private var metaInFlight = Set<String>()
 
     func allMountedDisks() -> [DiskUsage] {
-        guard let urls = fileManager.mountedVolumeURLs(
+        let urls = mountedVolumeURLs()
+        metaCache.retainOnly(mountPaths: Set(urls.map(\.path)))
+
+        let disks = urls.compactMap { diskUsage(for: $0) }
+
+        return disks.sorted { lhs, rhs in
+            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    /// Warms the `diskutil` metadata cache without blocking the caller.
+    ///
+    /// `diskutil` is a subprocess and can take seconds on a slow or stalled
+    /// volume, so it never runs on the main thread. Results are cached and
+    /// picked up the next time the menu is rebuilt.
+    func refreshDiskMetadataInBackground() {
+        let paths = mountedVolumeURLs().map(\.path)
+        metaCache.retainOnly(mountPaths: Set(paths))
+
+        for path in paths {
+            scheduleMetaLookup(forMountPath: path)
+        }
+    }
+
+    private func scheduleMetaLookup(forMountPath path: String) {
+        // Already cached and still fresh, or already being looked up.
+        guard metaCache.value(forMountPath: path) == nil,
+              !metaInFlight.contains(path) else {
+            return
+        }
+
+        metaInFlight.insert(path)
+
+        metaQueue.async { [weak self] in
+            let meta = DiskutilInspector.meta(forMountPath: path)
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.metaInFlight.remove(path)
+                self.metaCache.store(
+                    meta,
+                    forMountPath: path,
+                    // Don't hold on to a failure: retry sooner than a real hit.
+                    ttl: meta == .unknown ? DiskMetaCache.failureTTL : DiskMetaCache.ttl
+                )
+            }
+        }
+    }
+
+    private func mountedVolumeURLs() -> [URL] {
+        fileManager.mountedVolumeURLs(
             includingResourceValuesForKeys: [
                 .volumeNameKey,
                 .volumeLocalizedFormatDescriptionKey,
@@ -45,52 +132,47 @@ final class DiskUsageProvider {
                 .volumeIsLocalKey
             ],
             options: [.skipHiddenVolumes]
-        ) else {
-            return []
+        ) ?? []
+    }
+
+    private func diskUsage(for url: URL) -> DiskUsage? {
+        guard let values = try? url.resourceValues(forKeys: [
+            .volumeNameKey,
+            .volumeLocalizedFormatDescriptionKey,
+            .volumeTotalCapacityKey,
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityForOpportunisticUsageKey,
+            .volumeIsInternalKey,
+            .volumeIsEjectableKey,
+            .volumeIsLocalKey
+        ]) else {
+            return nil
         }
 
-        let disks: [DiskUsage] = urls.compactMap { url in
-            guard let values = try? url.resourceValues(forKeys: [
-                .volumeNameKey,
-                .volumeLocalizedFormatDescriptionKey,
-                .volumeTotalCapacityKey,
-                .volumeAvailableCapacityKey,
-                .volumeAvailableCapacityForImportantUsageKey,
-                .volumeAvailableCapacityForOpportunisticUsageKey,
-                .volumeIsInternalKey,
-                .volumeIsEjectableKey,
-                .volumeIsLocalKey
-            ]) else {
-                return nil
-            }
-
-            guard values.volumeIsLocal != false else {
-                return nil
-            }
-
-            guard let total = values.volumeTotalCapacity,
-                  let free = resolveFreeBytes(for: url, values: values),
-                  total > 0 else {
-                return nil
-            }
-
-            let meta = diskMeta(forMountPath: url.path)
-
-            return DiskUsage(
-                name: values.volumeName ?? url.lastPathComponent,
-                mountURL: url,
-                totalBytes: Int64(total),
-                freeBytes: free,
-                isExternal: values.volumeIsInternal == false,
-                isEjectable: values.volumeIsEjectable == true,
-                fileSystem: meta.fileSystem,
-                partitionMap: meta.partitionMap
-            )
+        guard values.volumeIsLocal != false else {
+            return nil
         }
 
-        return disks.sorted { lhs, rhs in
-            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        guard let total = values.volumeTotalCapacity,
+              let free = resolveFreeBytes(for: url, values: values),
+              total > 0 else {
+            return nil
         }
+
+        // Cache read only — never a subprocess on the main thread.
+        let meta = metaCache.value(forMountPath: url.path) ?? .unknown
+
+        return DiskUsage(
+            name: values.volumeName ?? url.lastPathComponent,
+            mountURL: url,
+            totalBytes: Int64(total),
+            freeBytes: free,
+            isExternal: values.volumeIsInternal == false,
+            isEjectable: values.volumeIsEjectable == true,
+            fileSystem: meta.fileSystem,
+            partitionMap: meta.partitionMap
+        )
     }
 
     func primaryDisk() -> DiskUsage? {
@@ -119,7 +201,7 @@ final class DiskUsageProvider {
             return nil
         }
 
-        let meta = diskMeta(forMountPath: url.path)
+        let meta = metaCache.value(forMountPath: url.path) ?? .unknown
 
         return DiskUsage(
             name: values.volumeName ?? "Macintosh HD",
@@ -131,122 +213,6 @@ final class DiskUsageProvider {
             fileSystem: meta.fileSystem,
             partitionMap: meta.partitionMap
         )
-    }
-
-    private func diskMeta(forMountPath mountPath: String) -> (fileSystem: String, partitionMap: String) {
-        let now = Date()
-        if let cached = diskutilCache[mountPath], now.timeIntervalSince(cached.timestamp) < diskutilCacheTTL {
-            return (cached.fileSystem, cached.partitionMap)
-        }
-
-        let meta = queryDiskutilMeta(forMountPath: mountPath) ?? ("Unknown", "Unknown")
-        diskutilCache[mountPath] = (meta.0, meta.1, now)
-        return meta
-    }
-
-    private func queryDiskutilMeta(forMountPath mountPath: String) -> (String, String)? {
-        guard let dict = diskutilInfoPlist(about: mountPath) else { return nil }
-
-        let fs = (dict["FilesystemUserVisibleName"] as? String)
-            ?? (dict["FilesystemName"] as? String)
-            ?? (dict["FileSystemName"] as? String)
-            ?? (dict["FileSystemPersonality"] as? String)
-            ?? (dict["FilesystemType"] as? String)
-
-        let partitionMap = resolvePartitionMap(fromDiskutilInfo: dict)
-
-        let fsValue = (fs?.isEmpty == false) ? fs! : "Unknown"
-        let mapValue = (partitionMap?.isEmpty == false) ? partitionMap! : "Unknown"
-        return (fsValue, mapValue)
-    }
-
-    private func resolvePartitionMap(fromDiskutilInfo dict: [String: Any]) -> String? {
-        // For mounted APFS volumes, partition scheme isn't exposed directly; we need to walk:
-        // volume -> APFSPhysicalStore -> ParentWholeDisk -> Content (e.g. GUID_partition_scheme)
-        let mapCandidates = [
-            dict["PartitionMapType"] as? String,
-            dict["PartitionMapScheme"] as? String,
-            dict["PartitionMapTypeDescription"] as? String
-        ].compactMap { $0 }
-
-        if let direct = mapCandidates.first(where: { !$0.isEmpty }) {
-            return normalizePartitionMap(raw: direct)
-        }
-
-        if let apfsStores = dict["APFSPhysicalStores"] as? [[String: Any]],
-           let storeId = apfsStores.first?["APFSPhysicalStore"] as? String,
-           let storeInfo = diskutilInfoPlist(about: storeId) {
-            if let whole = (storeInfo["ParentWholeDisk"] as? String) ?? (storeInfo["DeviceIdentifier"] as? String),
-               let wholeInfo = diskutilInfoPlist(about: whole),
-               let content = wholeInfo["Content"] as? String {
-                return normalizePartitionMap(raw: content)
-            }
-
-            if let content = storeInfo["Content"] as? String {
-                return normalizePartitionMap(raw: content)
-            }
-        }
-
-        if let parentWhole = dict["ParentWholeDisk"] as? String,
-           let wholeInfo = diskutilInfoPlist(about: parentWhole),
-           let content = wholeInfo["Content"] as? String {
-            return normalizePartitionMap(raw: content)
-        }
-
-        if let content = dict["Content"] as? String {
-            return normalizePartitionMap(raw: content)
-        }
-
-        return nil
-    }
-
-    private func normalizePartitionMap(raw: String) -> String? {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return nil }
-
-        switch value {
-        case "GPT", "GUID_partition_scheme":
-            return "GUID"
-        case "APM", "Apple_partition_scheme":
-            return "APM"
-        case "FDisk_partition_scheme", "MBR":
-            return "MBR"
-        default:
-            // If it looks like a UUID "Content" (common on APFS container/volumes), it's not a scheme.
-            if UUID(uuidString: value) != nil {
-                return nil
-            }
-            return value
-        }
-    }
-
-    private func diskutilInfoPlist(about target: String) -> [String: Any]? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        process.arguments = ["info", "-plist", target]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard
-            let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-            let dict = plist as? [String: Any]
-        else {
-            return nil
-        }
-
-        return dict
     }
 
     private func resolveFreeBytes(for url: URL, values: URLResourceValues) -> Int64? {
@@ -281,6 +247,228 @@ final class DiskUsageProvider {
         }
 
         return nil
+    }
+}
+
+/// Thread-safe cache for `diskutil` metadata.
+///
+/// Read on the main thread whenever the menu is rebuilt and written on a
+/// background queue, so it never blocks and never touches the filesystem.
+final class DiskMetaCache: @unchecked Sendable {
+    /// How long a successful lookup stays valid.
+    static let ttl: TimeInterval = 60 * 5
+
+    /// Failed lookups are retried sooner than successful ones, so a single
+    /// transient error doesn't leave a volume labelled "Unknown" for minutes.
+    static let failureTTL: TimeInterval = 60
+
+    private struct Entry {
+        let meta: DiskMeta
+        let timestamp: Date
+        let ttl: TimeInterval
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    /// Returns the cached metadata, or `nil` when it is missing or stale.
+    func value(forMountPath path: String) -> DiskMeta? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let entry = entries[path],
+              Date().timeIntervalSince(entry.timestamp) < entry.ttl else {
+            return nil
+        }
+
+        return entry.meta
+    }
+
+    func store(_ meta: DiskMeta, forMountPath path: String, ttl: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        entries[path] = Entry(meta: meta, timestamp: Date(), ttl: ttl)
+    }
+
+    /// Drops entries for volumes that are no longer mounted.
+    func retainOnly(mountPaths: Set<String>) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        entries = entries.filter { mountPaths.contains($0.key) }
+    }
+}
+
+/// Blocking `diskutil` plumbing.
+///
+/// Everything in here blocks on a subprocess, so it must only ever be invoked
+/// from a background queue — never from the main thread.
+enum DiskutilInspector {
+    private static let executable = URL(fileURLWithPath: "/usr/sbin/diskutil")
+
+    /// Upper bound for a single `diskutil` invocation, so a stalled or
+    /// unresponsive volume can't keep the background queue busy indefinitely.
+    private static let timeout: TimeInterval = 5
+
+    static func meta(forMountPath mountPath: String) -> DiskMeta {
+        guard let dict = infoPlist(about: mountPath) else { return .unknown }
+
+        let fileSystem = (dict["FilesystemUserVisibleName"] as? String)
+            ?? (dict["FilesystemName"] as? String)
+            ?? (dict["FileSystemName"] as? String)
+            ?? (dict["FileSystemPersonality"] as? String)
+            ?? (dict["FilesystemType"] as? String)
+
+        return DiskMeta(
+            fileSystem: nonEmpty(fileSystem) ?? "Unknown",
+            partitionMap: nonEmpty(resolvePartitionMap(fromDiskutilInfo: dict)) ?? "Unknown"
+        )
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+
+    private static func resolvePartitionMap(fromDiskutilInfo dict: [String: Any]) -> String? {
+        // For mounted APFS volumes, partition scheme isn't exposed directly; we need to walk:
+        // volume -> APFSPhysicalStore -> ParentWholeDisk -> Content (e.g. GUID_partition_scheme)
+        let mapCandidates = [
+            dict["PartitionMapType"] as? String,
+            dict["PartitionMapScheme"] as? String,
+            dict["PartitionMapTypeDescription"] as? String
+        ].compactMap { $0 }
+
+        if let direct = mapCandidates.first(where: { !$0.isEmpty }) {
+            return normalizePartitionMap(raw: direct)
+        }
+
+        if let apfsStores = dict["APFSPhysicalStores"] as? [[String: Any]],
+           let storeId = apfsStores.first?["APFSPhysicalStore"] as? String,
+           let storeInfo = infoPlist(about: storeId) {
+            if let whole = (storeInfo["ParentWholeDisk"] as? String) ?? (storeInfo["DeviceIdentifier"] as? String),
+               let wholeInfo = infoPlist(about: whole),
+               let content = wholeInfo["Content"] as? String {
+                return normalizePartitionMap(raw: content)
+            }
+
+            if let content = storeInfo["Content"] as? String {
+                return normalizePartitionMap(raw: content)
+            }
+        }
+
+        if let parentWhole = dict["ParentWholeDisk"] as? String,
+           let wholeInfo = infoPlist(about: parentWhole),
+           let content = wholeInfo["Content"] as? String {
+            return normalizePartitionMap(raw: content)
+        }
+
+        if let content = dict["Content"] as? String {
+            return normalizePartitionMap(raw: content)
+        }
+
+        return nil
+    }
+
+    private static func normalizePartitionMap(raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        switch value {
+        case "GPT", "GUID_partition_scheme":
+            return "GUID"
+        case "APM", "Apple_partition_scheme":
+            return "APM"
+        case "FDisk_partition_scheme", "MBR":
+            return "MBR"
+        default:
+            // If it looks like a UUID "Content" (common on APFS container/volumes), it's not a scheme.
+            if UUID(uuidString: value) != nil {
+                return nil
+            }
+            return value
+        }
+    }
+
+    // MARK: - Subprocess
+
+    private static func infoPlist(about target: String) -> [String: Any]? {
+        guard let data = runDiskutil(["info", "-plist", target]),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = plist as? [String: Any] else {
+            return nil
+        }
+
+        return dict
+    }
+
+    /// Runs `diskutil` and returns its stdout, or `nil` on failure or timeout.
+    ///
+    /// Both pipes are drained concurrently *before* waiting for the child to
+    /// exit. Reading them only after `waitUntilExit()` deadlocks as soon as the
+    /// child fills the 64 KB pipe buffer, and `stderr` previously was never
+    /// read at all — either case would freeze the app indefinitely.
+    private static func runDiskutil(_ arguments: [String]) -> Data? {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        let stdout = SynchronizedBox(Data())
+
+        // Both pipes are drained concurrently, into *separate* buffers: sharing
+        // one would let a slow stderr read clobber the plist we came for.
+        let drains = DispatchGroup()
+
+        drains.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stdout.value = outPipe.fileHandleForReading.readDataToEndOfFile()
+            drains.leave()
+        }
+
+        drains.enter()
+        DispatchQueue.global(qos: .utility).async {
+            // Discarded, but it must still be read: an unread pipe fills up and
+            // blocks the child forever.
+            _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+            drains.leave()
+        }
+
+        let exited = DispatchGroup()
+        exited.enter()
+        DispatchQueue.global(qos: .utility).async {
+            process.waitUntilExit()
+            exited.leave()
+        }
+
+        guard exited.wait(timeout: .now() + timeout) == .success else {
+            terminate(process, group: exited)
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else { return nil }
+
+        // The child is gone, so every write end is closed and this returns.
+        drains.wait()
+        return stdout.value
+    }
+
+    private static func terminate(_ process: Process, group: DispatchGroup) {
+        process.terminate()
+
+        guard group.wait(timeout: .now() + 1) == .timedOut, process.isRunning else { return }
+        Darwin.kill(process.processIdentifier, SIGKILL)
     }
 }
 
@@ -436,10 +624,15 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         menu.delegate = self
 
         updateStatusItem()
+        provider.refreshDiskMetadataInBackground()
 
+        // The timer deliberately does NOT rebuild the menu: `menuNeedsUpdate`
+        // already rebuilds it on every open, and doing it here would tear down
+        // the menu while the user is interacting with it — for a menu that is
+        // almost never open.
         refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             self?.updateStatusItem()
-            self?.rebuildMenu()
+            self?.provider.refreshDiskMetadataInBackground()
         }
     }
 
