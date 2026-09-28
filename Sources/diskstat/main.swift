@@ -865,6 +865,14 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private func ejectDisk(_ disk: DiskUsage) {
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: disk.mountURL)
+
+            // The eject button lives inside a custom `NSMenuItem.view`, so the
+            // click never becomes a menu item action and AppKit does NOT close
+            // the menu for us. Without this the menu stays open, the didUnmount
+            // refresh is deferred by `rebuildMenuIfIdle()` waiting for a close
+            // that never comes, and the row we just ejected sits there stale
+            // until the user dismisses the menu by hand.
+            menu.cancelTracking()
         } catch {
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
@@ -873,7 +881,7 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // The authoritative refresh is the didUnmount notification, which fires
         // when the unmount really completes. This is only a safety net in case
         // that notification is missed, and rebuildMenuIfIdle() defers if the
-        // menu is still open.
+        // menu is somehow still open.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.volumesDidChange()
         }
