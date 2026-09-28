@@ -196,7 +196,11 @@ final class DiskUsageProvider {
             return root
         }
 
-        return allMountedDisks().first
+        // Fall back to the built-in disk rather than whatever sorts first. The
+        // list is ordered by name, so a drive called "Backup" would otherwise be
+        // shown in the menu bar as if it were the system disk.
+        let disks = allMountedDisks()
+        return disks.first { !$0.isExternal } ?? disks.first
     }
 
     private func disk(atPath path: String) -> DiskUsage? {
@@ -997,10 +1001,19 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // already rebuilds it on every open, and doing it here would tear down
         // the menu while the user is interacting with it — for a menu that is
         // almost never open.
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
+        //
+        // Scheduled in the common modes so the 10s cadence holds even while a
+        // menu is open. AppKit runs the run loop in NSEventTrackingRunLoopMode
+        // during tracking, and a plain .default-mode timer simply does not fire
+        // there, which froze the menu bar icon for as long as the menu stayed
+        // open. Safe now precisely because of the change above: the timer only
+        // touches the status item and a background cache, never the menu.
+        let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
             self?.updateStatusItem()
             self?.provider.refreshDiskMetadataInBackground()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
 
         // A volume appearing or disappearing is the real signal that the disk
         // list is stale. Polling alone left an ejected volume listed in the
