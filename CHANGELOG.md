@@ -4,6 +4,12 @@ Versions are tagged; the bundle's `CFBundleShortVersionString` is read from the
 most recent tag at build time, so tagging is the only step needed to release.
 `CFBundleVersion` is the commit count.
 
+## 1.0.1 - 2025-09-28
+
+### Added
+- The version is shown next to the title in the menu, read from the bundle so
+  the number on screen is the one that was tagged.
+
 ## 1.0.0 - 2025-09-28
 
 First tagged release. Everything below landed after the initial commit.
