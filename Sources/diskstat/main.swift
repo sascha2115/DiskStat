@@ -85,17 +85,12 @@ final class DiskUsageProvider {
     /// volume, so it never runs on the main thread. Results are cached and
     /// picked up the next time the menu is rebuilt.
     func refreshDiskMetadataInBackground() {
-        let paths = mountedVolumePaths()
+        let paths = mountedVolumeURLs().map(\.path)
         metaCache.retainOnly(mountPaths: Set(paths))
 
         for path in paths {
             scheduleMetaLookup(forMountPath: path)
         }
-    }
-
-    /// Mount paths of every currently mounted local volume.
-    func mountedVolumePaths() -> [String] {
-        mountedVolumeURLs().map(\.path)
     }
 
     private func scheduleMetaLookup(forMountPath path: String) {
@@ -478,23 +473,12 @@ enum DiskutilInspector {
 }
 
 final class DiskMenuRowView: NSView {
-    private let onEject: ((DiskMenuRowView) -> Void)?
-
-    private let detailsLabel = NSTextField(labelWithString: "")
-    private let percentLabel = NSTextField(labelWithString: "")
-    private var ejectButton: NSButton?
-
-    private var normalDetails = ""
-    private var normalPercent = ""
-    private var isEjecting = false
-
-    private enum State { case normal, ejecting, finished }
-    private var state: State = .normal
+    private let onEject: (() -> Void)?
 
     init(
         disk: DiskUsage,
         formatter: ByteCountFormatter,
-        onEject: ((DiskMenuRowView) -> Void)? = nil
+        onEject: (() -> Void)? = nil
     ) {
         self.onEject = onEject
         super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 104))
@@ -543,20 +527,19 @@ final class DiskMenuRowView: NSView {
         let showEjectButton = disk.isExternal || disk.isEjectable
 
         if showEjectButton {
-            let button = NSButton(title: "", target: self, action: #selector(ejectTapped))
-            button.bezelStyle = .texturedRounded
-            button.isBordered = false
-            button.image = NSImage(
+            let ejectButton = NSButton(title: "", target: self, action: #selector(ejectTapped))
+            ejectButton.bezelStyle = .texturedRounded
+            ejectButton.isBordered = false
+            ejectButton.image = NSImage(
                 systemSymbolName: "eject.fill",
                 accessibilityDescription: "Eject \(disk.name)"
             )
-            button.contentTintColor = .secondaryLabelColor
-            button.setButtonType(.momentaryPushIn)
-            button.toolTip = "Eject \(disk.name)"
-            button.setContentHuggingPriority(.required, for: .horizontal)
-            button.setContentCompressionResistancePriority(.required, for: .horizontal)
-            topRow.addArrangedSubview(button)
-            ejectButton = button
+            ejectButton.contentTintColor = .secondaryLabelColor
+            ejectButton.setButtonType(.momentaryPushIn)
+            ejectButton.toolTip = "Eject \(disk.name)"
+            ejectButton.setContentHuggingPriority(.required, for: .horizontal)
+            ejectButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+            topRow.addArrangedSubview(ejectButton)
         }
 
         let progress = NSProgressIndicator()
@@ -567,15 +550,12 @@ final class DiskMenuRowView: NSView {
         progress.controlSize = .regular
         progress.style = .bar
 
-        normalDetails = "Used: \(used) of \(total)"
-        normalPercent = "\(percent)% used"
-
-        detailsLabel.stringValue = normalDetails
+        let detailsLabel = NSTextField(labelWithString: "Used: \(used) of \(total)")
         detailsLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailsLabel.textColor = .secondaryLabelColor
         detailsLabel.lineBreakMode = .byTruncatingTail
 
-        percentLabel.stringValue = normalPercent
+        let percentLabel = NSTextField(labelWithString: "\(percent)% used")
         percentLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         percentLabel.textColor = .labelColor
         percentLabel.alignment = .right
@@ -619,46 +599,9 @@ final class DiskMenuRowView: NSView {
     }
 
     @objc private func ejectTapped() {
-        guard let onEject, state == .normal else { return }
-        onEject(self)
+        onEject?()
     }
 
-    /// Shows in-place progress while the volume is being ejected, so the menu
-    /// can stay open.
-    ///
-    /// This only swaps label text and button state on a view we own. It never
-    /// touches the menu's item structure, which is what makes it safe to call
-    /// while AppKit is tracking the menu. The row is removed for real by the
-    /// rebuild that `menuDidClose` triggers.
-    func setEjecting(_ ejecting: Bool) {
-        guard state == .normal, isEjecting != ejecting else { return }
-        isEjecting = ejecting
-        state = ejecting ? .ejecting : .normal
-
-        ejectButton?.isEnabled = !ejecting
-        ejectButton?.contentTintColor = ejecting ? .tertiaryLabelColor : .secondaryLabelColor
-
-        detailsLabel.stringValue = ejecting ? "Ejecting…" : normalDetails
-        percentLabel.stringValue = ejecting ? "" : normalPercent
-    }
-
-    /// Final state for a row whose volume has actually gone away.
-    ///
-    /// The row cannot be removed while the menu is open, so without this it
-    /// would sit on "Ejecting…" until the user closed the menu, which reads as
-    /// a hung operation. Dimming it and saying so gives closure; the rebuild
-    /// on close then drops it.
-    func setEjected() {
-        guard state != .finished else { return }
-        state = .finished
-
-        ejectButton?.isEnabled = false
-        ejectButton?.contentTintColor = .tertiaryLabelColor
-
-        detailsLabel.stringValue = "Ejected"
-        percentLabel.stringValue = ""
-        alphaValue = 0.5
-    }
 }
 
 final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -689,10 +632,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     /// Block observers for volume mount/unmount, removed on termination.
     private var workspaceObservers: [NSObjectProtocol] = []
-
-    /// The row views currently on screen, keyed by mount path, so a volume that
-    /// disappears can be given a final state before its row is rebuilt away.
-    private var rowsByPath: [String: DiskMenuRowView] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -748,15 +687,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private func volumesDidChange() {
         updateStatusItem()
         provider.refreshDiskMetadataInBackground()
-
-        // Resolve rows on screen for volumes that are really gone. They cannot
-        // be removed while the menu is open, so give them a final state rather
-        // than leaving them stuck on "Ejecting…".
-        let mounted = Set(provider.mountedVolumePaths())
-        for (path, row) in rowsByPath where !mounted.contains(path) {
-            row.setEjected()
-        }
-
         rebuildMenuIfIdle()
     }
 
@@ -811,7 +741,6 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     private func rebuildMenu() {
         menu.removeAllItems()
-        rowsByPath.removeAll()
 
         let titleItem = NSMenuItem(title: "DiskStat", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
@@ -826,15 +755,13 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         } else {
             for disk in disks {
                 let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-                let row = DiskMenuRowView(
+                item.view = DiskMenuRowView(
                     disk: disk,
                     formatter: byteFormatter,
-                    onEject: { [weak self] row in
-                        self?.ejectDisk(disk, from: row)
+                    onEject: { [weak self] in
+                        self?.ejectDisk(disk)
                     }
                 )
-                item.view = row
-                rowsByPath[disk.path] = row
                 item.toolTip = disk.path
                 menu.addItem(item)
 
@@ -935,23 +862,26 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         NSSound.beep()
     }
 
-    private func ejectDisk(_ disk: DiskUsage, from row: DiskMenuRowView) {
-        // The menu stays open: the row reports "Ejecting…" in place instead of
-        // the menu being dismissed. Removing the row here would mean mutating a
-        // tracking menu, so the structural rebuild is left to `menuDidClose`.
-        row.setEjecting(true)
-
+    private func ejectDisk(_ disk: DiskUsage) {
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: disk.mountURL)
+
+            // The eject button lives inside a custom `NSMenuItem.view`, so the
+            // click never becomes a menu item action and AppKit does NOT close
+            // the menu for us. Without this the menu stays open, the didUnmount
+            // refresh is deferred by `rebuildMenuIfIdle()` waiting for a close
+            // that never comes, and the row we just ejected sits there stale
+            // until the user dismisses the menu by hand.
+            menu.cancelTracking()
         } catch {
             NSSound.beep()
             print("Failed to eject \(disk.path): \(error.localizedDescription)")
-            row.setEjecting(false)
         }
 
         // The authoritative refresh is the didUnmount notification, which fires
         // when the unmount really completes. This is only a safety net in case
-        // that notification is missed.
+        // that notification is missed, and rebuildMenuIfIdle() defers if the
+        // menu is somehow still open.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.volumesDidChange()
         }
