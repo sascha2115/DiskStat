@@ -1,0 +1,38 @@
+# Swift Package Manager
+# Build artifacts / module cache (~490 MB here) — regenerate with `swift build`
+.build/
+.swiftpm/
+Package.resolved.bak
+DerivedData/
+
+# Build output: app bundle created by scripts/build_app.sh
+Dist/
+
+# Finder alias at the repo root that points into Dist/DiskStat.app
+/DiskStat
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+
+# Editors / tools
+*.swp
+*~
+.idea/

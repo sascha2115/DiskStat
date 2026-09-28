@@ -1,0 +1,12 @@
+Files being cleaned:
+
+Root-level folders on the external disk:
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+
+Recursive file patterns anywhere on that disk:
+.DS_Store
+._* (AppleDouble/resource-fork sidecar files)
+

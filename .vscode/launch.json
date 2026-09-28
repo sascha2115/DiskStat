@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:DiskStat}",
+            "name": "Debug diskstat",
+            "target": "diskstat",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug diskstat"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:DiskStat}",
+            "name": "Release diskstat",
+            "target": "diskstat",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release diskstat"
+        }
+    ]
+}

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+APP_NAME="DiskStat"
+BUNDLE_ID="com.sascha.diskstat"
+VERSION="1.0"
+BUILD_NUMBER="1"
+ICON_PNG="$ROOT_DIR/Sources/icon/AppIcon.png"
+ICON_ICNS_NAME="DiskStat.icns"
+
+cd "$ROOT_DIR"
+
+swift build -c release
+
+APP_DIR="$ROOT_DIR/Dist/${APP_NAME}.app"
+CONTENTS_DIR="$APP_DIR/Contents"
+MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+BINARY_SRC="$ROOT_DIR/.build/release/diskstat"
+BINARY_DST="$MACOS_DIR/${APP_NAME}"
+
+rm -rf "$APP_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+cp "$BINARY_SRC" "$BINARY_DST"
+chmod +x "$BINARY_DST"
+
+if [[ -f "$ICON_PNG" ]] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+    ICONSET_DIR="$ROOT_DIR/.build/${APP_NAME}.iconset"
+    rm -rf "$ICONSET_DIR"
+    mkdir -p "$ICONSET_DIR"
+
+    # Generate the standard macOS iconset from the 1024x1024 source PNG.
+    for size in 16 32 64 128 256 512; do
+        sips -z "$size" "$size" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+        size2=$((size * 2))
+        sips -z "$size2" "$size2" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+    done
+
+    iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/$ICON_ICNS_NAME"
+else
+    echo "Warning: icon generation skipped (missing $ICON_PNG, sips, or iconutil)"
+fi
+
+cat > "$CONTENTS_DIR/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>${APP_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>${ICON_ICNS_NAME}</string>
+    <key>CFBundleIdentifier</key>
+    <string>${BUNDLE_ID}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>${APP_NAME}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>${BUILD_NUMBER}</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+if command -v codesign >/dev/null 2>&1; then
+    codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+fi
+
+echo "Built app bundle at: $APP_DIR"
