@@ -23,6 +23,12 @@ let package = Package(
             // is `swift-tools-version: 6.0`, which enables the Swift 6 language
             // mode and turns the remaining warnings into errors.
             swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]
+        ),
+        // The cleaner deletes files, so its safety guarantees are pinned down by
+        // tests rather than by review. Run with `swift test`.
+        .testTarget(
+            name: "DiskStatTests",
+            dependencies: ["diskstat"]
         )
     ]
 )

@@ -576,11 +576,18 @@ enum DiskCleaner {
     /// Scanning first and deleting afterwards is what makes cancellation
     /// possible, and it means nothing is removed until the whole tree has been
     /// read.
+    ///
+    /// Returns `nil` if the volume was refused. The startup-volume check lives
+    /// *here* and not only at the call site on purpose: this is the function
+    /// that deletes files, and it must refuse `/` even if a future caller
+    /// forgets to ask `canClean` first.
     static func clean(
         volume root: URL,
         progress: @escaping (Int) -> Void,
         isCancelled: @escaping () -> Bool
-    ) -> CleanResult {
+    ) -> CleanResult? {
+        guard root.standardizedFileURL.path != "/" else { return nil }
+
         var result = CleanResult()
         let found = scan(root, progress: progress, isCancelled: isCancelled)
 
@@ -600,6 +607,15 @@ enum DiskCleaner {
         }
 
         return result
+    }
+
+    /// Whether the entry itself is a symbolic link.
+    ///
+    /// `URL.resourceValues` reports on the link, not on what it points at, which
+    /// is exactly what is needed here.
+    private static func isSymlink(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey])
+        return values?.isSymbolicLink == true
     }
 
     /// Raw directory entries, including ones Foundation hides.
@@ -642,10 +658,10 @@ enum DiskCleaner {
             if isCancelled() { return [] }
 
             for name in directoryEntries(directory) {
+                let url = directory.appendingPathComponent(name)
+
                 if let artifact = MacArtifact(name: name) {
-                    found.append(
-                        CleanableItem(url: directory.appendingPathComponent(name), artifact: artifact)
-                    )
+                    found.append(CleanableItem(url: url, artifact: artifact))
                     continue
                 }
 
@@ -653,7 +669,15 @@ enum DiskCleaner {
                 // lives there, and .Spotlight-V100 in particular is enormous and
                 // slow to walk. That also leaves .Trashes untouched for free.
                 guard !name.hasPrefix("."), !name.hasPrefix("@") else { continue }
-                pending.append(directory.appendingPathComponent(name))
+
+                // Never follow a symlink. `opendir` resolves one, so a link on
+                // the volume pointing at a folder elsewhere on the Mac would
+                // otherwise pull the walk -- and the deletion -- clean outside
+                // the volume the user picked. Media drives accumulate exactly
+                // this kind of stray link.
+                if isSymlink(url) { continue }
+
+                pending.append(url)
             }
 
             progress(found.count)
@@ -1270,7 +1294,7 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // Deliberately a strong capture: the controller must outlive this so the
         // background work can always report its result back.
         cleanQueue.async { [self] in
-            let result = DiskCleaner.clean(
+            guard let result = DiskCleaner.clean(
                 volume: disk.mountURL,
                 progress: { found in
                     DispatchQueue.main.async {
@@ -1278,7 +1302,14 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
                     }
                 },
                 isCancelled: { self.cancelClean.value }
-            )
+            ) else {
+                // Refused: that is the volume macOS is running from.
+                DispatchQueue.main.async {
+                    self.cleaningDisk = nil
+                    row.setBusy(false)
+                }
+                return
+            }
 
             DiskCleaner.writeLog(disk: disk, result: result)
 
