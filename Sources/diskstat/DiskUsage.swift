@@ -21,6 +21,11 @@ struct DiskUsage: Identifiable {
     let fileSystem: String
     let partitionMap: String
 
+    /// The volume's device, e.g. `disk4s2`, or nil when `diskutil` has not
+    /// answered yet. See `DiskMeta.deviceIdentifier` for why it is worth a line
+    /// on the row.
+    let deviceIdentifier: String?
+
     var path: String {
         mountURL.path
     }

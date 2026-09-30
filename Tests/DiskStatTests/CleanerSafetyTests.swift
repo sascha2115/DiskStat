@@ -169,17 +169,17 @@ final class CleanerSafetyTests: XCTestCase {
         let internalDisk = DiskUsage(
             name: "Macintosh HD", mountURL: URL(fileURLWithPath: "/"),
             totalBytes: 1, freeBytes: 0, isExternal: false, isEjectable: false,
-            fileSystem: "apfs", partitionMap: "GUID"
+            fileSystem: "apfs", partitionMap: "GUID", deviceIdentifier: nil
         )
         let bootedExternally = DiskUsage(
             name: "Boot", mountURL: URL(fileURLWithPath: "/"),
             totalBytes: 1, freeBytes: 0, isExternal: true, isEjectable: true,
-            fileSystem: "apfs", partitionMap: "GUID"
+            fileSystem: "apfs", partitionMap: "GUID", deviceIdentifier: nil
         )
         let usb = DiskUsage(
             name: "Stick", mountURL: URL(fileURLWithPath: "/Volumes/Stick"),
             totalBytes: 1, freeBytes: 0, isExternal: true, isEjectable: true,
-            fileSystem: "msdos", partitionMap: "MBR"
+            fileSystem: "msdos", partitionMap: "MBR", deviceIdentifier: nil
         )
 
         XCTAssertFalse(DiskCleaner.canClean(internalDisk))
@@ -191,12 +191,12 @@ final class CleanerSafetyTests: XCTestCase {
         let bootedExternally = DiskUsage(
             name: "Boot", mountURL: URL(fileURLWithPath: "/"),
             totalBytes: 1, freeBytes: 0, isExternal: true, isEjectable: true,
-            fileSystem: "apfs", partitionMap: "GUID"
+            fileSystem: "apfs", partitionMap: "GUID", deviceIdentifier: nil
         )
         let usb = DiskUsage(
             name: "Stick", mountURL: URL(fileURLWithPath: "/Volumes/Stick"),
             totalBytes: 1, freeBytes: 0, isExternal: true, isEjectable: true,
-            fileSystem: "msdos", partitionMap: "MBR"
+            fileSystem: "msdos", partitionMap: "MBR", deviceIdentifier: nil
         )
 
         XCTAssertFalse(bootedExternally.canEject)
@@ -280,7 +280,8 @@ final class CleanerSafetyTests: XCTestCase {
             isExternal: true,
             isEjectable: true,
             fileSystem: "ExFAT",
-            partitionMap: "GPT"
+            partitionMap: "GPT",
+            deviceIdentifier: nil
         )
         DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
 
@@ -344,7 +345,8 @@ final class CleanerSafetyTests: XCTestCase {
             isExternal: true,
             isEjectable: true,
             fileSystem: "ExFAT",
-            partitionMap: "GPT"
+            partitionMap: "GPT",
+            deviceIdentifier: nil
         )
         _ = makeFile("Movies/.DS_Store")
         let result = try XCTUnwrap(clean())

@@ -158,7 +158,10 @@ final class DiskMenuRowView: NSView {
         bottomRow.spacing = 8
         bottomRow.distribution = .fill
 
-        let metaLabel = NSTextField(labelWithString: "\(disk.fileSystem) • \(disk.partitionMap)")
+        // The device is last, and omitted entirely when `diskutil` has not
+        // answered, so the line reads "exFAT • GUID • disk4s2" or just
+        // "exFAT • GUID" — never with a dangling separator.
+        let metaLabel = NSTextField(labelWithString: Self.metaLine(for: disk))
         metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
         metaLabel.textColor = .tertiaryLabelColor
         metaLabel.lineBreakMode = .byTruncatingTail
@@ -190,6 +193,24 @@ final class DiskMenuRowView: NSView {
         // The menu is assembled from these views, so the height must be right
         // before NSMenu measures the item.
         sizeToFitContent()
+    }
+
+    /// The filesystem line: `exFAT • GUID • disk4s2`.
+    ///
+    /// A static function rather than inline in `init` so it can be tested. The
+    /// row is an `NSView` assembled in its initialiser, so nothing about what
+    /// it actually renders is reachable from a test — an extracted function
+    /// means the one rule worth pinning (no trailing separator when the device
+    /// is unknown) is at least checkable.
+    /// `nonisolated` because it builds a string and touches no AppKit state, so a
+    /// test can call it without hopping to the main actor. The surrounding type
+    /// is `@MainActor`; this one member is not.
+    nonisolated static func metaLine(for disk: DiskUsage) -> String {
+        var parts = [disk.fileSystem, disk.partitionMap]
+        if let device = disk.deviceIdentifier {
+            parts.append(device)
+        }
+        return parts.joined(separator: " • ")
     }
 
     override func layout() {

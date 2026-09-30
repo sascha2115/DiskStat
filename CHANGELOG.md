@@ -4,6 +4,23 @@ Versions are tagged; the bundle's `CFBundleShortVersionString` is read from the
 most recent tag at build time, so tagging is the only step needed to release.
 `CFBundleVersion` is the commit count.
 
+## 1.0.3 - 2026-09-30
+
+### Added
+- Each disk row now shows the device macOS knows the volume by, after the
+  filesystem and partition scheme: `exFAT • GUID • disk4s2`. It comes from
+  `DeviceIdentifier` in the `diskutil` plist the app was already fetching and
+  discarding. Worth the line because that is the name macOS uses when it
+  *refuses* to act — "The disk disk4s2 wasn't ejected properly because a file
+  was in use" — and the name a `diskutil` error quotes, neither of which the
+  volume name ("MEDIADISK") matches. Omitted entirely when `diskutil` has not
+  answered, rather than showing a placeholder.
+- `DiskutilInspector.parse(_:)` is split out of `meta(forMountPath:)`, and
+  `DiskMenuRowView.metaLine(for:)` out of the row's initialiser, so the key
+  handling and the line's text can be tested. Neither was reachable before: the
+  first needed a subprocess, the second an `NSView`. 11 new tests, bringing the
+  suite to 32.
+
 ## 1.0.2 - 2026-09-30
 
 A finished clean is now reported where the user will actually see it, and two
@@ -48,7 +65,7 @@ it removes and what it refuses to remove.
   No behaviour changed — the only edit to any moved code is dropping `private`
   from `SynchronizedBox`, which two files now use and which Swift scopes to a
   single file. A new "Source Layout" section in `AGENTS.md` documents it.
-- `Tests/DiskStatTests` now has 21 tests. The exFAT sidecar regression lives in
+- `Tests/DiskStatTests` has 21 tests. The exFAT sidecar regression lives in
   its own `SidecarOfArtefactTests.swift` because it needs a real exFAT disk image
   to reproduce the bug at all; the rest are in `CleanerSafetyTests.swift`.
 - The clean button's tooltip is now "Clean and Eject", down from "Remove macOS

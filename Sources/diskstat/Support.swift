@@ -35,10 +35,27 @@ final class SynchronizedBox<Value>: @unchecked Sendable {
     }
 }
 
-/// Filesystem and partition scheme of a volume, as reported by `diskutil`.
+/// Filesystem, partition scheme and device of a volume, as reported by `diskutil`.
 struct DiskMeta: Equatable {
     let fileSystem: String
     let partitionMap: String
 
-    static let unknown = DiskMeta(fileSystem: "Unknown", partitionMap: "Unknown")
+    /// The kernel's name for the volume's device, e.g. `disk4s2` — without the
+    /// `/dev/` prefix that `DeviceNode` carries.
+    ///
+    /// Worth showing because it is the name macOS uses when it *refuses* to do
+    /// something: "The disk disk4s2 wasn't ejected properly because a file was in
+    /// use", or a `diskutil` error pasted into a bug report. A volume name on
+    /// its own ("MEDIADISK") matches none of that.
+    ///
+    /// Optional, and nil when unknown, rather than the "Unknown" placeholder the
+    /// other two use: there is no sensible text to put there, and a row reading
+    /// "exFAT • GUID • Unknown" is worse than one reading "exFAT • GUID".
+    let deviceIdentifier: String?
+
+    static let unknown = DiskMeta(
+        fileSystem: "Unknown",
+        partitionMap: "Unknown",
+        deviceIdentifier: nil
+    )
 }

@@ -10,7 +10,9 @@ Tiny macOS menu bar app that shows disk usage as a pie icon.
   - disk name
   - used / total size
   - used percentage
-  - filesystem and partition scheme
+  - filesystem, partition scheme, and the device macOS knows it by
+    (`exFAT • GUID • disk4s2`) — the last is the name macOS quotes when it
+    refuses to eject a busy disk, and it is what a `diskutil` error names
 - Per-disk buttons for removable volumes:
   - **eject** — unmount and eject the volume
   - **clean** — remove macOS artefacts (`.DS_Store`, `._*`, `@eaDir`, Spotlight

@@ -15,7 +15,16 @@ enum DiskutilInspector {
 
     static func meta(forMountPath mountPath: String) -> DiskMeta {
         guard let dict = infoPlist(about: mountPath) else { return .unknown }
+        return parse(dict)
+    }
 
+    /// Parses a `diskutil info -plist` dictionary.
+    ///
+    /// Split out from `meta(forMountPath:)` so the key handling can be tested
+    /// against synthetic dictionaries — the shapes a real volume does not
+    /// produce, such as a missing `DeviceIdentifier` or an empty one, cannot be
+    /// provoked by pointing at a real disk.
+    static func parse(_ dict: [String: Any]) -> DiskMeta {
         let fileSystem = (dict["FilesystemUserVisibleName"] as? String)
             ?? (dict["FilesystemName"] as? String)
             ?? (dict["FileSystemName"] as? String)
@@ -24,7 +33,14 @@ enum DiskutilInspector {
 
         return DiskMeta(
             fileSystem: nonEmpty(fileSystem) ?? "Unknown",
-            partitionMap: nonEmpty(resolvePartitionMap(fromDiskutilInfo: dict)) ?? "Unknown"
+            partitionMap: nonEmpty(resolvePartitionMap(fromDiskutilInfo: dict)) ?? "Unknown",
+            // `DeviceNode` is the same thing as "/dev/disk4s2" and is present on
+            // every volume; `DeviceIdentifier` is the bare form. Prefers the bare
+            // one and falls back rather than trimming, so an unexpected shape
+            // shows up as-is rather than being silently mangled.
+            deviceIdentifier: nonEmpty(dict["DeviceIdentifier"] as? String)
+                ?? nonEmpty(dict["DeviceNode"] as? String)?
+                    .replacingOccurrences(of: "/dev/", with: "")
         )
     }
 

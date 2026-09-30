@@ -122,7 +122,8 @@ final class DiskUsageProvider {
             isExternal: values.volumeIsInternal == false,
             isEjectable: values.volumeIsEjectable == true,
             fileSystem: meta.fileSystem,
-            partitionMap: meta.partitionMap
+            partitionMap: meta.partitionMap,
+            deviceIdentifier: meta.deviceIdentifier
         )
     }
 
@@ -164,7 +165,8 @@ final class DiskUsageProvider {
             isExternal: values.volumeIsInternal == false,
             isEjectable: values.volumeIsEjectable == true,
             fileSystem: meta.fileSystem,
-            partitionMap: meta.partitionMap
+            partitionMap: meta.partitionMap,
+            deviceIdentifier: meta.deviceIdentifier
         )
     }
 
