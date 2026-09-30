@@ -114,6 +114,55 @@ final class CleanerSafetyTests: XCTestCase {
         )
     }
 
+    /// 5. Markers the user placed on the volume on purpose are left alone. None
+    ///    of these are macOS artefacts, and two of them only work if they
+    ///    survive: a drive is prepared once, then cleaned repeatedly.
+    func testLeavesUserPlacedMarkersAlone() throws {
+        // A custom volume icon. Harmless to other devices, and deleting it
+        // just throws away something the user chose.
+        _ = makeFile(".VolumeIcon.icns")
+        // Tells Spotlight to leave the volume alone. No longer honoured by
+        // current macOS, but the file costs nothing and may still be doing
+        // something on the machine it was placed by.
+        _ = makeFile(".metadata_never_index")
+        _ = makeFile("Movies/.DS_Store")
+
+        _ = try XCTUnwrap(clean())
+
+        XCTAssertTrue(exists(".VolumeIcon.icns"), "a custom volume icon is not clutter")
+        XCTAssertTrue(exists(".metadata_never_index"))
+        XCTAssertFalse(exists("Movies/.DS_Store"), "the rest of the volume still gets cleaned")
+    }
+
+    /// A `no_log` marker inside `.fseventsd` is how a volume is told not to
+    /// journal file system events. Deleting the directory would delete the
+    /// marker, and macOS would recreate the directory and start logging again
+    /// on the next mount -- so the marker is kept and only the journal goes.
+    func testKeepsTheNoLogMarkerButClearsTheJournal() throws {
+        _ = makeFile(".fseventsd/no_log")
+        _ = makeFile(".fseventsd/1.log")
+        _ = makeFile("Movies/.DS_Store")
+
+        let result = try XCTUnwrap(clean())
+
+        XCTAssertTrue(exists(".fseventsd/no_log"),
+                      "the marker must survive, or the next mount restarts logging")
+        XCTAssertFalse(exists(".fseventsd/1.log"), "the journal itself is still cleaned")
+        XCTAssertEqual(result.removedByArtifact[.fileSystemEvents], 1,
+                       "the .fseventsd directory is still reported as cleaned")
+        XCTAssertFalse(exists("Movies/.DS_Store"))
+    }
+
+    /// A `.fseventsd` with no marker is just a macOS artefact, and is removed
+    /// outright. Preserving the directory is only for the marker.
+    func testRemovesFseventsdThatHasNoMarker() throws {
+        _ = makeFile(".fseventsd/1.log")
+
+        _ = try XCTUnwrap(clean())
+
+        XCTAssertFalse(exists(".fseventsd"), "without no_log there is nothing to preserve")
+    }
+
     // MARK: - Supporting behaviour
 
     func testCanCleanRejectsInternalAndStartupVolumes() {
@@ -169,6 +218,151 @@ final class CleanerSafetyTests: XCTestCase {
         XCTAssertTrue(exists("Movies/._Film.mkv"))
     }
 
+    // MARK: - Reporting a finished clean
+
+    /// The menu line is the primary record of a clean — the notification is not
+    /// sent under `swift run`, for an unidentifiable bundle, or when the user
+    /// declines the authorisation prompt — so every outcome it can report has to
+    /// read correctly, including the ones that only ever happen on a bad day.
+    func testLastCleanSummaryReportsEveryOutcome() {
+        func summary(
+            removed: Int, failed: Int = 0, cancelled: Bool = false, ejectFailed: Bool = false
+        ) -> String {
+            LastClean(
+                removed: removed,
+                failed: failed,
+                wasCancelled: cancelled,
+                ejectFailed: ejectFailed
+            ).summary
+        }
+
+        // Both counts are always present, in the agreed order, so the line has
+        // one shape whatever happened. A zero is shown rather than dropped:
+        // "24 removed · 0 failed" is what confirms the clean finished.
+        XCTAssertEqual(summary(removed: 1204), "1204 removed · 0 failed")
+        XCTAssertEqual(summary(removed: 1204, failed: 4), "1204 removed · 4 failed")
+
+        // Problems are named, because this line is the only place they surface.
+        XCTAssertEqual(summary(removed: 0, ejectFailed: true),
+                       "0 removed · 0 failed · eject failed")
+        XCTAssertEqual(summary(removed: 1200, failed: 4, ejectFailed: true),
+                       "1200 removed · 4 failed · eject failed")
+
+        // A cancelled clean neither ejected nor failed, and must not read like a
+        // clean finish — it left the volume mounted on purpose.
+        XCTAssertEqual(summary(removed: 500, cancelled: true),
+                       "cancelled · 500 removed")
+        XCTAssertFalse(summary(removed: 500, failed: 3, cancelled: true).contains("failed"),
+                       "a cancelled clean did not fail to remove anything")
+
+        // Zero removals is a real outcome — a drive with no artefacts on it.
+        XCTAssertEqual(summary(removed: 0), "0 removed · 0 failed")
+    }
+
+    /// A finished clean has to leave a log the user can actually open, since
+    /// that is the only record that names individual paths.
+    func testWriteLogCreatesAReadableFile() throws {
+        // A temporary directory, passed in rather than set globally: the real log
+        // is the developer's own, and this test appends to it.
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("diskstat-log-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        _ = makeFile("Movies/Film.mkv")
+        _ = makeFile("Movies/.DS_Store")
+        let result = try XCTUnwrap(clean())
+
+        let disk = DiskUsage(
+            name: "MYSTICK",
+            mountURL: root,
+            totalBytes: 1_000,
+            freeBytes: 500,
+            isExternal: true,
+            isEjectable: true,
+            fileSystem: "ExFAT",
+            partitionMap: "GPT"
+        )
+        DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
+
+        // The menu item is enabled by this file existing, so this is the
+        // condition the feature depends on.
+        let written = sandbox.appendingPathComponent("DiskStat_clean.log")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: written.path),
+                      "a finished clean must leave a log to open")
+
+        let text = try String(contentsOf: written, encoding: .utf8)
+        XCTAssertTrue(text.contains("MYSTICK"), "the log must name the volume")
+        XCTAssertTrue(text.contains("Summary: removed=1"),
+                      "the log must carry the counts")
+        // The whole point of the log: the individual path, not just a total.
+        XCTAssertTrue(text.contains(".DS_Store"),
+                      "the log must name what was removed, not only how much")
+    }
+
+    /// The clear-log action has to remove the file, and to report honestly when
+    /// there was nothing to remove — the menu item greys out, but the action is
+    /// still reachable through the responder chain.
+    func testClearLogRemovesTheFileAndReportsWhenThereIsNothing() throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("diskstat-clear-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+
+        let log = sandbox.appendingPathComponent("DiskStat_clean.log")
+
+        // Nothing there yet: must not claim success, and must not create a file.
+        XCTAssertFalse(DiskCleaner.clearLog(at: sandbox),
+                       "clearing an empty directory must not claim success")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path),
+                       "clearing must not create a log")
+
+        // A real log goes away, and the caller is told it did.
+        try Data("a past clean".utf8).write(to: log)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path))
+        XCTAssertTrue(DiskCleaner.clearLog(at: sandbox),
+                      "clearing an existing log must report success")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path),
+                       "the log must actually be gone")
+
+        // And it does not create one on the way out either.
+        XCTAssertFalse(DiskCleaner.clearLog(at: sandbox))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
+    }
+
+    /// A clean after a clear must still write a fresh log, so clearing loses
+    /// history rather than breaking the feature.
+    func testLogIsWrittenAgainAfterBeingCleared() throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("diskstat-clear-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let disk = DiskUsage(
+            name: "MYSTICK",
+            mountURL: root,
+            totalBytes: 1_000,
+            freeBytes: 500,
+            isExternal: true,
+            isEjectable: true,
+            fileSystem: "ExFAT",
+            partitionMap: "GPT"
+        )
+        _ = makeFile("Movies/.DS_Store")
+        let result = try XCTUnwrap(clean())
+
+        DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
+        XCTAssertTrue(DiskCleaner.clearLog(at: sandbox))
+
+        _ = makeFile("Music/.DS_Store")
+        let second = try XCTUnwrap(clean())
+        DiskCleaner.writeLog(disk: disk, result: second, directory: sandbox)
+
+        let log = sandbox.appendingPathComponent("DiskStat_clean.log")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path),
+                      "a clean after a clear must write a new log")
+        let text = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(text.contains("Music"), "the new log is the new run, not the old one")
+    }
+
     // MARK: - Classification
 
     func testArtifactClassification() {
@@ -179,12 +373,33 @@ final class CleanerSafetyTests: XCTestCase {
         XCTAssertEqual(MacArtifact(name: ".Spotlight-V100"), .spotlight)
         XCTAssertEqual(MacArtifact(name: ".fseventsd"), .fileSystemEvents)
         XCTAssertEqual(MacArtifact(name: ".TemporaryItems"), .temporaryItems)
+        XCTAssertEqual(MacArtifact(name: ".apdisk"), .apDisk)
 
         // Never in scope, and anything unrecognised is left alone.
         XCTAssertNil(MacArtifact(name: ".Trashes"), ".Trashes must never be cleanable")
         XCTAssertNil(MacArtifact(name: "Film.mkv"))
         XCTAssertNil(MacArtifact(name: ".hidden-config"))
         XCTAssertNil(MacArtifact(name: "notes.txt"))
+
+        // `.apdisk` must match only exactly. It is the one artefact whose name
+        // is a near-miss for another rule: a case-insensitive or prefix match
+        // would drag `apdisk.bak` and friends in with it.
+        XCTAssertNil(MacArtifact(name: "apdisk"))
+        XCTAssertNil(MacArtifact(name: ".apdisk.bak"))
+        XCTAssertNil(MacArtifact(name: ".apdisk2"))
+    }
+
+    /// `.apdisk` is removed, and it is counted as its own type so the log can
+    /// account for it.
+    func testRemovesApDiskMarker() throws {
+        _ = makeFile(".apdisk")
+        _ = makeFile("notes.txt")
+
+        let result = try XCTUnwrap(clean())
+
+        XCTAssertFalse(exists(".apdisk"))
+        XCTAssertEqual(result.removedByArtifact[.apDisk], 1)
+        XCTAssertTrue(exists("notes.txt"), "user files must survive")
     }
 
     // MARK: - Log summary
@@ -216,7 +431,7 @@ final class CleanerSafetyTests: XCTestCase {
     func testEveryArtifactAppearsInTheSummaryOrder() {
         // Guards against an artefact being added to the enum but forgotten in the
         // log's "By type" section, which would silently under-report it.
-        XCTAssertEqual(Set(MacArtifact.allCases).count, 6)
+        XCTAssertEqual(Set(MacArtifact.allCases).count, 7)
         for artifact in MacArtifact.allCases {
             XCTAssertFalse(artifact.summary.isEmpty)
         }
