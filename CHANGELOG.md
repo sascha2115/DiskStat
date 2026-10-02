@@ -4,6 +4,27 @@ Versions are tagged; the bundle's `CFBundleShortVersionString` is read from the
 most recent tag at build time, so tagging is the only step needed to release.
 `CFBundleVersion` is the commit count.
 
+## 1.0.4 - 2026-10-02
+
+The log no longer has a delete button, because it had one button too many next
+to the item that opens it.
+
+### Removed
+- The `Clear Clean Log` menu item is gone, and the log now keeps the **last 10
+  cleans** instead. It was one row below `Show Clean Log…` with no confirmation
+  and no undo, so the wrong click destroyed the only record naming individual
+  removed paths — which is exactly what happened. Bounding the log by age
+  removes the destructive action entirely rather than guarding it: there is
+  nothing left to click by accident, and no confirmation dialog to click
+  through. Nothing is really given up, since the oldest clean's paths are of no
+  use once several drives later.
+- A record is one whole clean, from its timestamped header to the blank line
+  before the next, so the cap counts *cleans* and never lines or bytes. The old
+  1 MB cap deleted the entire file at once; the log now drops records
+  oldest-first, and always keeps the newest — including when that one record
+  alone exceeds the byte backstop, since a log with nothing in it is no record
+  at all. 37 tests, up from 34.
+
 ## 1.0.3 - 2026-09-30
 
 ### Added

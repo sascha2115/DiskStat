@@ -300,41 +300,126 @@ final class CleanerSafetyTests: XCTestCase {
                       "the log must name what was removed, not only how much")
     }
 
-    /// The clear-log action has to remove the file, and to report honestly when
-    /// there was nothing to remove — the menu item greys out, but the action is
-    /// still reachable through the responder chain.
-    func testClearLogRemovesTheFileAndReportsWhenThereIsNothing() throws {
-        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("diskstat-clear-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: sandbox) }
-        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+    /// A record is one whole clean, from its timestamped header to the blank line
+    /// before the next one — never a count of lines and never a byte offset.
+    ///
+    /// This is what makes "keep the last ten cleans" expressible: the split
+    /// decides what a record *is*, so a cap counted in records is the same as a
+    /// cap counted in actions. Counting lines instead would evict a clean that
+    /// listed many paths after one that listed few, which is not what "last ten"
+    /// means to the person reading it.
+    func testRecordsSplitOnTheHeaderNotTheLineCount() {
+        let text = """
+            [2026-09-30 10:00:00] Cleaned MYSTICK (/Volumes/MYSTICK)
+            Summary: removed=3, failed=0
+            Removed items:
+              /Volumes/MYSTICK/a
+              /Volumes/MYSTICK/b
+              /Volumes/MYSTICK/c
 
-        let log = sandbox.appendingPathComponent("DiskStat_clean.log")
+            [2026-09-30 11:00:00] Cleaned MEDIADISK (/Volumes/MEDIADISK)
+            Summary: removed=1, failed=0
+            Removed items:
+              /Volumes/MEDIADISK/d
 
-        // Nothing there yet: must not claim success, and must not create a file.
-        XCTAssertFalse(DiskCleaner.clearLog(at: sandbox),
-                       "clearing an empty directory must not claim success")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path),
-                       "clearing must not create a log")
+            """
 
-        // A real log goes away, and the caller is told it did.
-        try Data("a past clean".utf8).write(to: log)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path))
-        XCTAssertTrue(DiskCleaner.clearLog(at: sandbox),
-                      "clearing an existing log must report success")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path),
-                       "the log must actually be gone")
+        let records = DiskCleaner.records(in: text)
+        XCTAssertEqual(records.count, 2, "two cleans, two records — not one per line")
+        XCTAssertTrue(records[0].hasPrefix("[2026-09-30 10:00:00]"))
+        XCTAssertTrue(records[1].hasPrefix("[2026-09-30 11:00:00]"))
+        XCTAssertTrue(records[1].contains("/Volumes/MEDIADISK/d"))
 
-        // And it does not create one on the way out either.
-        XCTAssertFalse(DiskCleaner.clearLog(at: sandbox))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
+        // Round-trips exactly, so trimming cannot silently reformat the log.
+        XCTAssertEqual(records.joined(), text,
+                       "splitting and rejoining must not alter the log")
     }
 
-    /// A clean after a clear must still write a fresh log, so clearing loses
-    /// history rather than breaking the feature.
-    func testLogIsWrittenAgainAfterBeingCleared() throws {
+    /// The cap keeps the last ten cleans and drops the rest, newest intact.
+    ///
+    /// The property that replaced the delete button: the log stays useful and
+    /// bounded without the user ever being offered a way to destroy it.
+    func testKeepsTheLastTenCleansAndNoMore() {
+        var text = ""
+        for index in 1...14 {
+            text += "[2026-09-30 10:00:\(String(format: "%02d", index))] Cleaned DISK\(index) (/Volumes/D\(index))\n"
+            text += "Summary: removed=1, failed=0\n"
+            text += "Removed items:\n  /Volumes/D\(index)/.DS_Store\n\n"
+        }
+
+        let kept = DiskCleaner.recordsToKeep(text)
+        let records = DiskCleaner.records(in: kept)
+
+        XCTAssertEqual(records.count, DiskCleaner.maxLogRecords,
+                       "the log must hold at most the last ten cleans")
+        XCTAssertEqual(records.count, 10)
+
+        // The ten most recent, and not the ten oldest.
+        XCTAssertTrue(records[0].contains("DISK5"), "the oldest kept is clean #5")
+        XCTAssertTrue(records[9].contains("DISK14"), "the newest clean must be kept")
+
+        // The dropped ones are genuinely gone, and the newest is whole.
+        XCTAssertFalse(kept.contains("DISK4"), "clean #4 is older than the cap")
+        XCTAssertTrue(kept.contains("/Volumes/D14/.DS_Store"),
+                      "the newest record must be complete, not truncated")
+    }
+
+    /// A log shorter than the cap is left exactly as it is. Trimming must not
+    /// disturb what it is not required to remove, or every clean would rewrite
+    /// history it had no reason to touch.
+    func testLeavesALogUnderTheCapAlone() {
+        let text = "[2026-09-30 10:00:00] Cleaned MYSTICK (/Volumes/MYSTICK)\nSummary: removed=1, failed=0\n\n"
+        XCTAssertEqual(DiskCleaner.recordsToKeep(text), text)
+    }
+
+    /// The byte cap exists because ten records can still be enormous — one clean
+    /// of a large media library lists every path it removed. When it bites, the
+    /// oldest go, and the newest survives whatever.
+    func testByteCapDropsOldestButNeverTheNewest() {
+        // Each record alone fits under the cap; together they do not. Two records of
+        // just over half the cap, so the drop is forced.
+        let filler = String(repeating: "x", count: DiskCleaner.maxLogBytes / 2 + 1_000)
+        let text = """
+            [2026-09-30 10:00:00] Cleaned OLD (/Volumes/OLD)
+            Summary: removed=1, failed=0
+            Removed items:
+              \(filler)
+
+            [2026-09-30 11:00:00] Cleaned NEW (/Volumes/NEW)
+            Summary: removed=1, failed=0
+            Removed items:
+              \(filler)
+
+            """
+
+        let kept = DiskCleaner.recordsToKeep(text)
+
+        XCTAssertFalse(kept.contains("OLD"), "the oldest record goes when over the byte cap")
+        XCTAssertTrue(kept.contains("NEW"),
+                      "the newest record must survive the byte cap — it is the whole point")
+    }
+
+    /// Even a single record too big for the cap on its own is kept. Dropping it
+    /// would leave the user with no record at all of the clean that just ran.
+    func testASingleOversizedRecordIsStillKept() {
+        let filler = String(repeating: "x", count: DiskCleaner.maxLogBytes + 1_000)
+        let text = """
+            [2026-09-30 11:00:00] Cleaned HUGE (/Volumes/HUGE)
+            Summary: removed=1, failed=0
+            Removed items:
+              \(filler)
+
+            """
+
+        let kept = DiskCleaner.recordsToKeep(text)
+        XCTAssertTrue(kept.contains("HUGE"),
+                      "an oversized record must be kept, since there is nothing older to drop")
+    }
+
+    /// Repeated cleans must leave a usable log and never grow it without bound.
+    func testWritingRepeatedlyKeepsTheLogBounded() throws {
         let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("diskstat-clear-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("diskstat-cap-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: sandbox) }
 
         let disk = DiskUsage(
@@ -348,21 +433,57 @@ final class CleanerSafetyTests: XCTestCase {
             partitionMap: "GPT",
             deviceIdentifier: nil
         )
-        _ = makeFile("Movies/.DS_Store")
-        let result = try XCTUnwrap(clean())
 
-        DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
-        XCTAssertTrue(DiskCleaner.clearLog(at: sandbox))
-
-        _ = makeFile("Music/.DS_Store")
-        let second = try XCTUnwrap(clean())
-        DiskCleaner.writeLog(disk: disk, result: second, directory: sandbox)
+        for index in 1...(DiskCleaner.maxLogRecords + 5) {
+            _ = makeFile("Run\(index)/.DS_Store")
+            let result = try XCTUnwrap(clean())
+            DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
+        }
 
         let log = sandbox.appendingPathComponent("DiskStat_clean.log")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path),
-                      "a clean after a clear must write a new log")
         let text = try String(contentsOf: log, encoding: .utf8)
-        XCTAssertTrue(text.contains("Music"), "the new log is the new run, not the old one")
+
+        XCTAssertEqual(DiskCleaner.records(in: text).count, DiskCleaner.maxLogRecords,
+                       "fifteen cleans must leave ten records on disk, not fifteen")
+        XCTAssertTrue(text.contains("Run15"), "the newest clean must be in the log")
+        XCTAssertFalse(text.contains("Run1/"), "the oldest clean must have been dropped")
+    }
+
+    /// A clean after the cap has been reached must still write a fresh log, so
+    /// trimming loses history rather than breaking the feature.
+    func testLogIsStillWrittenAfterTheCapIsReached() throws {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("diskstat-cap2-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let disk = DiskUsage(
+            name: "MYSTICK",
+            mountURL: root,
+            totalBytes: 1_000,
+            freeBytes: 500,
+            isExternal: true,
+            isEjectable: true,
+            fileSystem: "ExFAT",
+            partitionMap: "GPT",
+            deviceIdentifier: nil
+        )
+
+        for index in 1...DiskCleaner.maxLogRecords {
+            _ = makeFile("Old\(index)/.DS_Store")
+            let result = try XCTUnwrap(clean())
+            DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
+        }
+
+        // One more clean, well past the cap.
+        _ = makeFile("Music/.DS_Store")
+        let result = try XCTUnwrap(clean())
+        DiskCleaner.writeLog(disk: disk, result: result, directory: sandbox)
+
+        let log = sandbox.appendingPathComponent("DiskStat_clean.log")
+        let text = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(text.contains("Music"), "the new record must be written, not dropped")
+        XCTAssertEqual(DiskCleaner.records(in: text).count, DiskCleaner.maxLogRecords,
+                       "the cap still holds after the eleventh clean")
     }
 
     // MARK: - Classification

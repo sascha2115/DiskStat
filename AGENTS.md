@@ -78,7 +78,13 @@ internal to its own type and travels with it when moved.
   - Runs on a background queue; the clean button becomes a cancel button
   - Keeps working across a menu rebuild, and throttles progress to 4/sec
   - Logs every removed path to `~/Library/Logs/DiskStat_clean.log`,
-    grouped by artefact type ahead of the path list
+    grouped by artefact type ahead of the path list. Keeps the last
+    `maxLogRecords` (10) cleans and trims on every write, so it needs no
+    clearing and cannot grow without bound. **There is no delete-the-log
+    action** — it removed the only record naming individual paths and sat
+    one row below the log viewer. A record is a whole clean, split on the
+    timestamp header; a byte cap (`maxLogBytes`) drops oldest-first and
+    always keeps the newest, even if that one record exceeds it alone
   - Ejects on success; a cancelled run leaves the volume mounted
   - Posts a system notification with the counts, because the menu row showing
     the result is not on screen if the menu was closed during the run. Plain

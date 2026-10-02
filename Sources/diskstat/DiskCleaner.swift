@@ -334,8 +334,7 @@ enum DiskCleaner {
     static let logDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs", isDirectory: true)
 
-    /// Appends a record of a clean. A big volume can list hundreds of thousands
-    /// of paths, so the file is capped and restarted once it grows too large.
+    /// Appends a record of a clean, trimming the file back to `maxLogRecords`.
     ///
     /// `directory` defaults to the real log location and exists so a test can
     /// pass a temporary one. Parameterised rather than set through a mutable
@@ -356,8 +355,8 @@ enum DiskCleaner {
         if result.wasCancelled { summary += " (cancelled)" }
         lines.append(summary)
 
-        // Grouped by type first, so the useful part of the record survives even
-        // if the cap below rolls the file over on a very large clean.
+        // Grouped by type first, so the useful part of a record survives even if
+        // a very large clean pushes earlier records out of the log.
         if !result.removedByArtifact.isEmpty {
             lines.append("By type:")
             for artifact in MacArtifact.allCases where result.removedByArtifact[artifact] != nil {
@@ -377,38 +376,81 @@ enum DiskCleaner {
         appendToLog(lines.joined(separator: "\n") + "\n", to: directory)
     }
 
-    /// Removes the clean log, if there is one.
+    /// How many cleans the log keeps.
     ///
-    /// No confirmation is asked for. The log is a convenience record — it is
-    /// written again by the next clean — and a menu click on a deliberately
-    /// worded item is intent enough. Returns whether anything was removed, so
-    /// the caller can stay quiet when there was nothing to do.
+    /// The whole retention policy: the last ten actions, oldest dropped. This
+    /// replaces a "Clear Clean Log" menu item that deleted the entire file —
+    /// which, sitting one row below `Show Clean Log…`, was one word away from
+    /// being clicked by accident. Bounding the log by age instead of offering to
+    /// destroy it means there is no destructive action to get wrong, and no
+    /// confirmation dialog to click through.
+    static let maxLogRecords = 10
+
+    /// Backstop on file size, in bytes.
     ///
-    /// `directory` defaults to the real log location and exists so a test can
-    /// pass a temporary one. Parameterised rather than set through a mutable
-    /// global, for the same reason `writeLog` does it.
-    @discardableResult
-    static func clearLog(at directory: URL = logDirectory) -> Bool {
-        let url = directory.appendingPathComponent("DiskStat_clean.log", isDirectory: false)
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
-        do {
-            try FileManager.default.removeItem(at: url)
-            return true
-        } catch {
-            return false
+    /// A record-count cap alone does not bound the bytes: one clean on a large
+    /// media library can list hundreds of thousands of paths, so ten records
+    /// could still be hundreds of megabytes. Records are dropped oldest-first
+    /// until the file fits, which degrades to "fewer than ten very recent
+    /// cleans" rather than to "no log at all".
+    static let maxLogBytes = 20_000_000
+
+    /// A clean's record begins with this, and only this.
+    ///
+    /// Anchoring the split on the header rather than on blank lines or a byte
+    /// count means a record is never cut in half: a partially written last
+    /// record would otherwise be counted as one and could be promoted into a
+    /// truncated entry that claims fewer removals than happened.
+    static let recordHeaderPrefix = "["
+
+    /// Splits log text into records, newest last.
+    ///
+    /// Each element is a whole record including its trailing blank line, so
+    /// joining the result reproduces the input exactly — which is what lets the
+    /// trimmer rewrite the file without silently reformatting it.
+    static func records(in text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+
+        // Slices of the original text rather than lines rejoined into new ones.
+        // Reassembly loses bytes: a record's trailing blank line is what
+        // separates it from the next header, and rebuilding from `split` output
+        // drops one newline, welding every record onto the next. Slicing by
+        // offset makes `records.joined() == text` true by construction, which is
+        // what makes trimming lossless.
+        var starts: [String.Index] = []
+        var isLineStart = true
+
+        for index in text.indices {
+            if isLineStart, text[index...].hasPrefix(recordHeaderPrefix) {
+                starts.append(index)
+            }
+            isLineStart = text[index] == "\n"
         }
+
+        // No header at all: one record, so trimming still has something to keep.
+        guard let first = starts.first else { return [text] }
+
+        var records: [String] = []
+
+        // Anything before the first header is kept rather than dropped. It
+        // should not exist — every write starts a record — but a hand-edited or
+        // older-format log must not lose its opening lines over a format
+        // mismatch.
+        if first != text.startIndex {
+            records.append(String(text[..<first]))
+        }
+
+        for (offset, start) in starts.enumerated() {
+            let end = offset + 1 < starts.count ? starts[offset + 1] : text.endIndex
+            records.append(String(text[start..<end]))
+        }
+
+        return records
     }
 
     private static func appendToLog(_ text: String, to directory: URL) {
         let url = directory.appendingPathComponent("DiskStat_clean.log", isDirectory: false)
         let manager = FileManager.default
-        let data = Data(text.utf8)
-
-        if let attributes = try? manager.attributesOfItem(atPath: url.path),
-           let size = attributes[.size] as? NSNumber,
-           size.int64Value > 1_000_000 {
-            try? manager.removeItem(at: url)
-        }
 
         if !manager.fileExists(atPath: url.path) {
             try? manager.createDirectory(
@@ -417,12 +459,35 @@ enum DiskCleaner {
             )
         }
 
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            try? handle.close()
-        } else {
-            try? data.write(to: url)
+        // Appending the new record, then trimming, rather than trimming the old
+        // file and appending: the new record is the one the user just caused and
+        // must never be the one dropped for being over the cap.
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let kept = recordsToKeep(existing + text)
+
+        try? Data(kept.utf8).write(to: url)
+    }
+
+    /// The newest records that fit within both caps, as one log's worth of text.
+    ///
+    /// Always keeps at least the newest record: on a single clean that lists
+    /// hundreds of thousands of paths the whole file may exceed the byte cap on
+    /// its own, and dropping the only record would leave the user with no record
+    /// of the clean that just ran — the one thing the log exists to provide.
+    static func recordsToKeep(_ text: String) -> String {
+        var kept = Array(records(in: text).suffix(maxLogRecords))
+
+        while kept.count > 1, totalBytes(of: kept) > maxLogBytes {
+            kept.removeFirst()
         }
+
+        return kept.joined()
+    }
+
+    private static func totalBytes(of records: [String]) -> Int {
+        // Parenthesised rather than a trailing closure: the whole expression is
+        // the `while` condition, so a bare trailing closure reads as the loop
+        // body and the compiler warns about exactly that ambiguity.
+        records.reduce(0, { $0 + $1.utf8.count })
     }
 }

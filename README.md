@@ -30,11 +30,14 @@ Tiny macOS menu bar app that shows disk usage as a pie icon.
   - a finished clean also posts a system notification with what was removed. It
     asks for notification permission on first launch. Only available from the
     `.app` bundle — under `swift run` there is no bundle id to authorise.
-- Includes `Refresh Now`, `Open Storage Settings…`, `Show Clean Log…`,
-  `Clear Clean Log` and `Quit DiskStat` actions. The two log items are enabled
-  only once a log exists, at `~/Library/Logs/DiskStat_clean.log` — the only
-  record that names individual removed paths. `Clear Clean Log` deletes it with
-  no confirmation; the next clean writes a fresh one.
+- Includes `Refresh Now`, `Open Storage Settings…`, `Show Clean Log…` and
+  `Quit DiskStat` actions. The log item is enabled only once a log exists, at
+  `~/Library/Logs/DiskStat_clean.log` — the only record that names individual
+  removed paths. The log keeps the **last 10 cleans** and is trimmed on every
+  write, so it needs no clearing and cannot grow without bound. There is
+  deliberately no "delete the log" item: a destructive action sitting one row
+  below the log viewer is one mis-click from destroying the only record of what
+  was removed, and nothing is lost by letting it age out.
 
 ## What a clean removes
 
