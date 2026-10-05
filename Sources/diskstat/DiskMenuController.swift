@@ -395,6 +395,10 @@ final class DiskMenuController: NSObject, NSApplicationDelegate, NSMenuDelegate 
         logItem.isEnabled = FileManager.default.fileExists(atPath: DiskCleaner.logURL.path)
         menu.addItem(logItem)
 
+        // Separates the actions that operate on disks from leaving the app —
+        // quitting is not one more thing you can do here.
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "Quit DiskStat", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)

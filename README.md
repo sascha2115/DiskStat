@@ -31,7 +31,9 @@ Tiny macOS menu bar app that shows disk usage as a pie icon.
     asks for notification permission on first launch. Only available from the
     `.app` bundle — under `swift run` there is no bundle id to authorise.
 - Includes `Refresh Now`, `Open Storage Settings…`, `Show Clean Log…` and
-  `Quit DiskStat` actions. The log item is enabled only once a log exists, at
+  `Quit DiskStat` actions, with `Quit DiskStat` set off by a separator so
+  leaving the app is not just one more thing to do in that group. The log item
+  is enabled only once a log exists, at
   `~/Library/Logs/DiskStat_clean.log` — the only record that names individual
   removed paths. The log keeps the **last 10 cleans** and is trimmed on every
   write, so it needs no clearing and cannot grow without bound. There is
