@@ -493,13 +493,14 @@ final class CleanerSafetyTests: XCTestCase {
         XCTAssertEqual(MacArtifact(name: "._Film.mkv"), .appleDouble)
         XCTAssertEqual(MacArtifact(name: "@eaDir"), .extendedAttributes)
         XCTAssertEqual(MacArtifact(name: "@eaDir12"), .extendedAttributes)
-        XCTAssertEqual(MacArtifact(name: ".Spotlight-V100"), .spotlight)
         XCTAssertEqual(MacArtifact(name: ".fseventsd"), .fileSystemEvents)
         XCTAssertEqual(MacArtifact(name: ".TemporaryItems"), .temporaryItems)
         XCTAssertEqual(MacArtifact(name: ".apdisk"), .apDisk)
 
         // Never in scope, and anything unrecognised is left alone.
         XCTAssertNil(MacArtifact(name: ".Trashes"), ".Trashes must never be cleanable")
+        XCTAssertNil(MacArtifact(name: ".Spotlight-V100"),
+                     "root-owned and undeletable by the app; see testLeavesTheSpotlightIndexAlone")
         XCTAssertNil(MacArtifact(name: "Film.mkv"))
         XCTAssertNil(MacArtifact(name: ".hidden-config"))
         XCTAssertNil(MacArtifact(name: "notes.txt"))
@@ -510,6 +511,30 @@ final class CleanerSafetyTests: XCTestCase {
         XCTAssertNil(MacArtifact(name: "apdisk"))
         XCTAssertNil(MacArtifact(name: ".apdisk.bak"))
         XCTAssertNil(MacArtifact(name: ".apdisk2"))
+    }
+
+    /// `.Spotlight-V100` is left alone, and nothing about it is reported.
+    ///
+    /// macOS creates the index as root and protects it, so an app running as
+    /// the logged-in user cannot delete it — every attempt ended in a failure
+    /// on every volume, every time. It is out of scope rather than attempted:
+    /// a clean that always reports one failure it cannot fix is a clean whose
+    /// failure count the user learns to ignore, and that count is the only
+    /// signal that a real problem happened.
+    ///
+    /// The cost is real and worth stating: on a long-used card the index can be
+    /// the largest single artefact on the volume, and none of it is reclaimed.
+    /// That was already true — the delete never succeeded.
+    func testLeavesTheSpotlightIndexAlone() throws {
+        _ = makeFile(".Spotlight-V100/.store.db")
+        _ = makeFile("Movies/.DS_Store")
+
+        let result = try XCTUnwrap(clean())
+
+        XCTAssertTrue(exists(".Spotlight-V100"), "the index must survive untouched")
+        XCTAssertTrue(exists(".Spotlight-V100/.store.db"))
+        XCTAssertFalse(exists("Movies/.DS_Store"), "the rest of the volume still gets cleaned")
+        XCTAssertEqual(result.failedCount, 0, "an untouched artefact is not a failure")
     }
 
     /// `.apdisk` is removed, and it is counted as its own type so the log can
@@ -554,7 +579,7 @@ final class CleanerSafetyTests: XCTestCase {
     func testEveryArtifactAppearsInTheSummaryOrder() {
         // Guards against an artefact being added to the enum but forgotten in the
         // log's "By type" section, which would silently under-report it.
-        XCTAssertEqual(Set(MacArtifact.allCases).count, 7)
+        XCTAssertEqual(Set(MacArtifact.allCases).count, 6)
         for artifact in MacArtifact.allCases {
             XCTAssertFalse(artifact.summary.isEmpty)
         }

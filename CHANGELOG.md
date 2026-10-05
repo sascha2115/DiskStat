@@ -4,6 +4,32 @@ Versions are tagged; the bundle's `CFBundleShortVersionString` is read from the
 most recent tag at build time, so tagging is the only step needed to release.
 `CFBundleVersion` is the commit count.
 
+## Unreleased
+
+### Removed
+- `.Spotlight-V100` is no longer in a clean's scope, so a clean no longer ends
+  in `".Spotlight-V100" couldn't be removed because you don't have permission to
+  access it` on every volume, every time. macOS creates the index as root and
+  protects it; an app running as the logged-in user cannot delete it, so the
+  attempt was guaranteed to fail and guaranteed to be counted as one. It is now
+  skipped rather than attempted, because a permanent failure the app can do
+  nothing about is worse than no failure at all — it trains the user to ignore
+  the `failed` count, which is the only signal that a real problem happened.
+  Nothing is lost in practice: the delete never succeeded, so no bytes were
+  being reclaimed before either. The trade-off is written up under **Never
+  removed** in the README.
+- One artefact type in the log's "By type" section: six remain instead of seven.
+
+### Added
+- `testLeavesTheSpotlightIndexAlone`, plus a `XCTAssertNil` in the classification
+  test. Together they pin the new behaviour, so a future prefix or name rule
+  that starts matching `.Spotlight-V100` again goes red instead of quietly
+  restoring the error. 38 tests, up from 37.
+
+### Changed
+- `Quit DiskStat` now sits below a separator, so the three actions that operate
+  on disks and the one that leaves the app are not read as a single group.
+
 ## 1.0.4 - 2026-10-02
 
 The log no longer has a delete button, because it had one button too many next

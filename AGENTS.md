@@ -60,6 +60,15 @@ internal to its own type and travels with it when moved.
   recreates it and restarts journalling. The first two survive for free,
   because nothing matches their names, but they are pinned by tests so a future
   `._*`-style prefix rule cannot quietly start eating them
+- **Root-owned artefacts are not in scope, and must not be added back**:
+  `.Spotlight-V100` is created by macOS as root and cannot be deleted by an
+  app running as the logged-in user. It was in scope until it turned out every
+  clean ended in the same unfixable permission failure. Attempting an artefact
+  the app provably cannot remove is worse than not attempting it: a permanent
+  failure trains the user to ignore the `failed` count, and that count is the
+  only signal that a real problem happened. `testLeavesTheSpotlightIndexAlone`
+  and the `MacArtifact(name:)` classification test pin this — a new prefix or
+  name rule that matches it turns them red.
 - **Symlinks are never followed**: a link is never removed and never
   descended into, so a clean cannot reach outside the selected volume.
   Re-enforced inside `DiskCleaner.clean()`, not only at the UI layer. Two

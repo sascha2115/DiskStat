@@ -15,9 +15,10 @@ Tiny macOS menu bar app that shows disk usage as a pie icon.
     refuses to eject a busy disk, and it is what a `diskutil` error names
 - Per-disk buttons for removable volumes:
   - **eject** — unmount and eject the volume
-  - **clean** — remove macOS artefacts (`.DS_Store`, `._*`, `@eaDir`, Spotlight
-    index and friends) and then eject, so the drive is clean when it reaches
-    Kodi or Windows. Never touches `.Trashes`; see
+  - **clean** — remove macOS artefacts (`.DS_Store`, `._*`, `@eaDir`, the file
+    change journal and friends) and then eject, so the drive is clean when it
+    reaches Kodi or Windows. Never touches `.Trashes`, and never attempts
+    `.Spotlight-V100`, which no user process may delete; see
     [What a clean removes](#what-a-clean-removes).
   - the outcome is reported on a **"Last clean"** line in the menu, as
     `<n> removed · <m> failed` (both counts always shown, a cancelled run reads
@@ -56,7 +57,6 @@ restricted to the top level.
 | `._*` | AppleDouble sidecars (extended attributes, resource forks). These are what Kodi and Windows see as duplicate media files, and the main offender on a media drive |
 | `@eaDir` | Folders holding metadata for over-long filenames (FAT/exFAT only). Often the largest single win: one shard per file, running to gigabytes on a long-used card |
 | `.apdisk` | The volume marker macOS writes on a volume it has connected. Recreated on the next connect |
-| `.Spotlight-V100` | Spotlight's search index for the volume |
 | `.fseventsd` | The file system change journal |
 | `.TemporaryItems` | macOS scratch space |
 
@@ -71,6 +71,17 @@ rather than two.
 - The startup volume, and any volume other than the one selected
 - Anything reached through a symlink: a link is never removed and never
   descended into, so a clean cannot reach outside the selected volume
+- `.Spotlight-V100` — the Spotlight index. macOS creates it as root and
+  protects it, so an app running as the logged-in user cannot delete it. It
+  used to be in scope and **every** clean ended in
+  `".Spotlight-V100" couldn't be removed because you don't have permission to
+  access it`. It is out of scope rather than attempted, because a failure the
+  app can do nothing about is worse than no failure: it trains you to ignore
+  the `failed` count, and that count is the only signal that a real problem
+  happened. The cost is that none of the index is reclaimed — which was already
+  true, because the delete never succeeded. If you want it gone, that is a
+  `sudo` job on a Mac where you can disable indexing, not something this app
+  can do on your behalf
 
 **Left alone because the user put them there, not because macOS did**
 
